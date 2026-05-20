@@ -1,0 +1,56 @@
+{
+  "expo": {
+    "name": "Sales Tracker",
+    "slug": "supabase-sales",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#1A3C6E"
+    },
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#1A3C6E"
+      },
+      "edgeToEdgeEnabled": true,
+      "package": "com.salestracker.app",
+      "permissions": [
+        "NOTIFICATIONS",
+        "WRITE_EXTERNAL_STORAGE"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-font",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon.png",
+          "color": "#1A3C6E"
+        }
+      ],
+      "@react-native-community/datetimepicker",
+      "expo-updates"
+    ],
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "owner": "bhawnanivarun0",
+    "extra": {
+      "eas": {
+        "projectId": "2bab2548-56ee-40f8-8c83-8e1a20817999"
+      }
+    }
+  }
+}

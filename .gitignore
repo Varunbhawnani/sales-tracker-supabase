@@ -1,0 +1,29 @@
+node_modules/
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+.metro-health-check*
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+.DS_Store
+*.pem
+
+# Real secrets — never commit
+.env
+.env*.local
+.env.production
+.env.development
+
+# Build artifacts
+*.tsbuildinfo
+/ios
+/android
