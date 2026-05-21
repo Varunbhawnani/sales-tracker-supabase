@@ -5,11 +5,12 @@ import {
 import { COLORS, STATUS, LEGACY_STATUS, ROLES, SAFE_TOP } from '../utils/constants';
 import { useAuth } from '../contexts/AuthContext';
 import { subscribeToQueries, adminResetInvoiceAttempts, flagBackToSales } from '../services/queryService';
+import { subscribeToUsers } from '../services/authService';
 import { getLeaderboardData } from '../services/statsService';
-import { getAllUsers } from '../services/authService';
 import { subscribeToSettings } from '../services/settingsService';
-import { formatSets } from '../utils/formatUtils';
 import { relativeTime } from '../utils/timeUtils';
+import GodownFilterChip from '../components/GodownFilterChip';
+import { useGodownFilter } from '../contexts/GodownFilterContext';
 import FilterTabs from '../components/FilterTabs';
 import BarChart from '../components/BarChart';
 import StatCard from '../components/StatCard';
@@ -120,6 +121,7 @@ const pipelineStyles = StyleSheet.create({
 
 export default function OwnerDashboardScreen() {
   const { logout } = useAuth();
+  const { filterQueries, filterUsers, filterByUserId } = useGodownFilter();
   const [queries, setQueries] = useState([]);
   const [users, setUsers] = useState([]);
   const [leaderboard, setLeaderboard] = useState([]);
@@ -127,24 +129,23 @@ export default function OwnerDashboardScreen() {
   const [loading, setLoading] = useState(true);
   const [thresholdDays, setThresholdDays] = useState(30);
 
+  const loadLeaderboard = useCallback(async () => {
+    try { setLeaderboard(await getLeaderboardData()); } catch (e) { console.error(e); }
+  }, []);
+
   useEffect(() => {
     const unsubQ = subscribeToQueries((data) => {
       setQueries(data);
       setLoading(false);
+      // Refresh the leaderboard whenever queries change so the team-throughput
+      // card mirrors live cartoons/lots changes from accounts edits, mark-won
+      // events, etc. The Owner Dashboard previously did this once at mount.
+      loadLeaderboard();
     });
+    const unsubU = subscribeToUsers((list) => setUsers(list));
     const unsubS = subscribeToSettings((s) => setThresholdDays(s.gonequietThresholdDays || 30));
-    loadUsers();
-    loadLeaderboard();
-    return () => { unsubQ(); unsubS(); };
-  }, []);
-
-  const loadUsers = async () => {
-    try { setUsers(await getAllUsers()); } catch (e) { console.error(e); }
-  };
-
-  const loadLeaderboard = useCallback(async () => {
-    try { setLeaderboard(await getLeaderboardData()); } catch (e) { console.error(e); }
-  }, []);
+    return () => { unsubQ(); unsubU(); unsubS(); };
+  }, [loadLeaderboard]);
 
   const handleLogout = () => {
     Alert.alert('Log Out', 'Are you sure?', [
@@ -153,7 +154,13 @@ export default function OwnerDashboardScreen() {
     ]);
   };
 
+  // Godown scope applied here once; every derived view (stats, pipeline,
+  // alerts, per-salesperson breakdown) reads from this filtered list.
+  const scopedQueries = useMemo(() => filterQueries(queries), [queries, filterQueries]);
+  const scopedLeaderboard = useMemo(() => filterByUserId(leaderboard), [leaderboard, filterByUserId]);
+
   const stats = useMemo(() => {
+    const queries = scopedQueries; // shadow so the existing block below reads from scope
     const total = queries.length;
     const open = queries.filter(q => OPEN_STATUSES.includes(q.status)).length;
     const won = queries.filter(q => WON_STATUSES.includes(q.status)).length;
@@ -161,17 +168,30 @@ export default function OwnerDashboardScreen() {
     const pendingAccounts = queries.filter(q => ACCOUNTS_PIPELINE.includes(q.status)).length;
     const pendingDispatch = queries.filter(q => DISPATCH_PIPELINE.includes(q.status)).length;
     const completed = queries.filter(q => q.status === STATUS.COMPLETED || q.status === LEGACY_STATUS.SUCCESSFUL).length;
-    const totalSetsSold = queries
-      .filter(q => WON_STATUSES.includes(q.status))
-      .reduce((sum, q) => sum + (q.requiredSets || 0), 0);
+    // Cartoons + lots are the live unit. We sum each separately so the UI can
+    // show two distinct figures, and we also keep a combined "totalUnitsSold"
+    // for the headline stat card. Legacy queries (cartoons + lots both zero)
+    // fall back to required_sets so historical pre-cartoons rows still
+    // contribute a number rather than vanishing.
+    const wonQueries = queries.filter(q => WON_STATUSES.includes(q.status));
+    const totalCartoonsSold = wonQueries.reduce((s, q) => s + (q.cartoons || 0), 0);
+    const totalLotsSold = wonQueries.reduce((s, q) => s + (q.lots || 0), 0);
+    const totalUnitsSold = wonQueries.reduce((s, q) => {
+      const c = q.cartoons || 0;
+      const l = q.lots || 0;
+      return s + ((c + l) > 0 ? (c + l) : (q.requiredSets || 0));
+    }, 0);
     const verificationFailed = queries.filter(q => q.status === STATUS.VERIFICATION_FAILED).length;
     const partiallyDispatched = queries.filter(q => q.status === STATUS.PARTIALLY_DISPATCHED).length;
-    const totalSetsDispatched = queries
-      .filter(q => [STATUS.VERIFIED_PENDING_DISPATCH, STATUS.PARTIALLY_DISPATCHED, STATUS.COMPLETED].includes(q.status))
-      .reduce((s, q) => s + (q.dispatchedSets || 0), 0);
-    const totalSetsRequired = queries
-      .filter(q => [STATUS.VERIFIED_PENDING_DISPATCH, STATUS.PARTIALLY_DISPATCHED, STATUS.COMPLETED].includes(q.status))
-      .reduce((s, q) => s + (q.requiredSets || 0), 0);
+    const dispatchedQueries = queries.filter(q =>
+      [STATUS.VERIFIED_PENDING_DISPATCH, STATUS.PARTIALLY_DISPATCHED, STATUS.COMPLETED].includes(q.status)
+    );
+    const totalCartoonsDispatched = dispatchedQueries
+      .filter(q => q.status === STATUS.COMPLETED)
+      .reduce((s, q) => s + (q.cartoons || 0), 0);
+    const totalLotsDispatched = dispatchedQueries
+      .filter(q => q.status === STATUS.COMPLETED)
+      .reduce((s, q) => s + (q.lots || 0), 0);
 
     // ─── Packing throughput ──────────────────────────────────────────────────
     // A query is "in packing" once verified and accounts handed it off — that
@@ -196,11 +216,12 @@ export default function OwnerDashboardScreen() {
 
     return {
       total, open, won, lost, pendingAccounts, pendingDispatch, completed,
-      totalSetsSold, verificationFailed, partiallyDispatched,
-      totalSetsDispatched, totalSetsRequired,
+      totalUnitsSold, totalCartoonsSold, totalLotsSold,
+      totalCartoonsDispatched, totalLotsDispatched,
+      verificationFailed, partiallyDispatched,
       packingQueue, readyToShip, packedToday, packedThisWeek,
     };
-  }, [queries]);
+  }, [scopedQueries]);
 
   const pipelineData = useMemo(() => [
     { label: 'Open', value: stats.open, color: COLORS.openQuery },
@@ -211,39 +232,46 @@ export default function OwnerDashboardScreen() {
     { label: 'Lost', value: stats.lost, color: COLORS.lostCancelled },
   ], [stats]);
 
-  const salesTeamUsers = users.filter(u => u.role === ROLES.SALESPERSON && u.isActive !== false);
-  const accountsUsers = users.filter(u => u.role === ROLES.ACCOUNTS && u.isActive !== false);
-  const dispatchUsers = users.filter(u => u.role === ROLES.DISPATCH && u.isActive !== false);
+  // Apply godown scope to the team listings as well — when the owner picks a
+  // godown, the per-salesperson breakdown below only includes godown members.
+  const scopedUsers = useMemo(() => filterUsers(users), [users, filterUsers]);
+  const salesTeamUsers = scopedUsers.filter(u => u.role === ROLES.SALESPERSON && u.isActive !== false);
+  const accountsUsers = scopedUsers.filter(u => u.role === ROLES.ACCOUNTS && u.isActive !== false);
+  const dispatchUsers = scopedUsers.filter(
+    u => (u.role === ROLES.DISPATCH || u.role === ROLES.OPERATIONS || u.role === ROLES.PACKING)
+      && u.isActive !== false
+  );
 
   const salespersonStats = useMemo(() => {
     return salesTeamUsers.map(u => {
-      const userQueries = queries.filter(q => q.claimedBy?.userId === u.id);
+      const userQueries = scopedQueries.filter(q => q.claimedBy?.userId === u.id);
       const wonQ = userQueries.filter(q => WON_STATUSES.includes(q.status));
       const lostQ = userQueries.filter(q => LOST_STATUSES.includes(q.status));
-      const totalSets = wonQ.reduce((s, q) => s + (q.requiredSets || 0), 0);
+      const cartoons = wonQ.reduce((s, q) => s + (q.cartoons || 0), 0);
+      const lots = wonQ.reduce((s, q) => s + (q.lots || 0), 0);
       const total = wonQ.length + lostQ.length;
       const rate = total > 0 ? Math.round((wonQ.length / total) * 100) : 0;
       return {
         id: u.id, name: u.name, username: u.username,
         claimed: userQueries.length, won: wonQ.length, lost: lostQ.length,
-        sets: totalSets, rate,
+        cartoons, lots, rate,
         open: userQueries.filter(q => OPEN_STATUSES.includes(q.status)).length,
       };
-    }).sort((a, b) => b.sets - a.sets);
-  }, [queries, salesTeamUsers]);
+    }).sort((a, b) => (b.cartoons + b.lots) - (a.cartoons + a.lots));
+  }, [scopedQueries, salesTeamUsers]);
 
   // Queries raised in the last 20 days, newest first
   const recentPipeline = useMemo(() => {
     const cutoff = Date.now() - 20 * 24 * 60 * 60 * 1000;
-    return queries
+    return scopedQueries
       .filter(q => q.createdAt && q.createdAt.getTime() >= cutoff)
       .sort((a, b) => (b.createdAt?.getTime() || 0) - (a.createdAt?.getTime() || 0));
-  }, [queries]);
+  }, [scopedQueries]);
 
   // Queries locked after 5 failed invoice attempts
   const lockedQueries = useMemo(
-    () => queries.filter(q => (q.invoiceAttemptCount || 0) >= 5),
-    [queries]
+    () => scopedQueries.filter(q => (q.invoiceAttemptCount || 0) >= 5),
+    [scopedQueries]
   );
 
   const handleUnlock = async (queryId) => {
@@ -270,7 +298,11 @@ export default function OwnerDashboardScreen() {
     <>
       <View style={styles.statsRow}>
         <StatCard label="Total Queries" value={stats.total} />
-        <StatCard label="Sets Booked" value={formatSets(stats.totalSetsSold)} color={COLORS.completed} />
+        <StatCard
+          label="Booked"
+          value={`${stats.totalCartoonsSold}c · ${stats.totalLotsSold}l`}
+          color={COLORS.completed}
+        />
       </View>
       <View style={styles.statsRow}>
         <StatCard label="Completed" value={stats.completed} color={COLORS.completed} />
@@ -327,10 +359,10 @@ export default function OwnerDashboardScreen() {
           <InsightRow color={COLORS.verifiedPendingDispatch} title={`${stats.readyToShip} ready to ship`} desc="Packed and waiting for dispatch." />
         )}
         {stats.partiallyDispatched > 0 && (
-          <InsightRow color={COLORS.verifiedPendingDispatch} title={`${stats.partiallyDispatched} partially dispatched`} desc="Some sets shipped; the rest are still pending." />
+          <InsightRow color={COLORS.verifiedPendingDispatch} title={`${stats.partiallyDispatched} partially dispatched`} desc="Some units shipped; the rest are still pending." />
         )}
         {salespersonStats.length > 0 && (
-          <InsightRow color={COLORS.primary} title={`Top: ${salespersonStats[0]?.name}`} desc={`${salespersonStats[0]?.sets} sets · ${salespersonStats[0]?.won} booked · ${salespersonStats[0]?.rate}% rate`} />
+          <InsightRow color={COLORS.primary} title={`Top: ${salespersonStats[0]?.name}`} desc={`${salespersonStats[0]?.cartoons}c · ${salespersonStats[0]?.lots}l · ${salespersonStats[0]?.won} booked · ${salespersonStats[0]?.rate}% rate`} />
         )}
         {stats.open === 0 && stats.pendingAccounts === 0 && stats.pendingDispatch === 0 && (
           <InsightRow color={COLORS.completed} title="Everything looks great!" desc="No urgent items right now." />
@@ -407,8 +439,12 @@ export default function OwnerDashboardScreen() {
                 <Text style={styles.userStatLabel}>Lost</Text>
               </View>
               <View style={styles.userStatItem}>
-                <Text style={[styles.userStatValue, { color: COLORS.primary }]}>{sp.sets}</Text>
-                <Text style={styles.userStatLabel}>Sets</Text>
+                <Text style={[styles.userStatValue, { color: COLORS.primary }]}>{sp.cartoons}</Text>
+                <Text style={styles.userStatLabel}>Cartons</Text>
+              </View>
+              <View style={styles.userStatItem}>
+                <Text style={[styles.userStatValue, { color: COLORS.primary }]}>{sp.lots}</Text>
+                <Text style={styles.userStatLabel}>Lots</Text>
               </View>
               <View style={styles.userStatItem}>
                 <Text style={[styles.userStatValue, { color: COLORS.openQuery }]}>{sp.open}</Text>
@@ -429,7 +465,7 @@ export default function OwnerDashboardScreen() {
         <StatCard label="Failed" value={stats.verificationFailed} color={COLORS.danger} />
       </View>
       <View style={styles.statsRow}>
-        <StatCard label="Verified" value={queries.filter(q => q.status === STATUS.VERIFIED_PENDING_DISPATCH || q.status === STATUS.PARTIALLY_DISPATCHED || q.status === STATUS.COMPLETED).length} color={COLORS.completed} />
+        <StatCard label="Verified" value={scopedQueries.filter(q => q.status === STATUS.VERIFIED_PENDING_DISPATCH || q.status === STATUS.PARTIALLY_DISPATCHED || q.status === STATUS.COMPLETED).length} color={COLORS.completed} />
         <StatCard label="Completed" value={stats.completed} color={COLORS.completed} />
       </View>
 
@@ -448,7 +484,7 @@ export default function OwnerDashboardScreen() {
       {stats.verificationFailed > 0 && (
         <>
           <Text style={[styles.sectionTitle, { marginTop: 16 }]}>⚠ Verification Failures</Text>
-          {queries.filter(q => q.status === STATUS.VERIFICATION_FAILED).slice(0, 5).map(q => (
+          {scopedQueries.filter(q => q.status === STATUS.VERIFICATION_FAILED).slice(0, 5).map(q => (
             <View key={q.id} style={[styles.alertCard, { borderLeftColor: COLORS.danger }]}>
               <Text style={styles.alertTitle}>{q.customerName}</Text>
               <Text style={styles.alertDesc}>{q.verificationError || 'Invoice not found'}</Text>
@@ -461,19 +497,24 @@ export default function OwnerDashboardScreen() {
   );
 
   const renderDispatch = () => {
-    const dispatchPct = stats.totalSetsRequired > 0
-      ? Math.round((stats.totalSetsDispatched / stats.totalSetsRequired) * 100) : 0;
-
     return (
       <>
         <Text style={styles.sectionTitle}>Dispatch Overview</Text>
         <View style={styles.statsRow}>
-          <StatCard label="Pending" value={queries.filter(q => q.status === STATUS.VERIFIED_PENDING_DISPATCH).length} color={COLORS.verifiedPendingDispatch} />
+          <StatCard label="Pending" value={scopedQueries.filter(q => q.status === STATUS.VERIFIED_PENDING_DISPATCH).length} color={COLORS.verifiedPendingDispatch} />
           <StatCard label="Partial" value={stats.partiallyDispatched} color={COLORS.warning} />
         </View>
         <View style={styles.statsRow}>
-          <StatCard label="Sets Shipped" value={formatSets(stats.totalSetsDispatched)} color={COLORS.primary} />
-          <StatCard label="Fulfillment" value={`${dispatchPct}%`} color={COLORS.completed} />
+          <StatCard
+            label="Shipped (Cartons)"
+            value={stats.totalCartoonsDispatched}
+            color={COLORS.primary}
+          />
+          <StatCard
+            label="Shipped (Lots)"
+            value={stats.totalLotsDispatched}
+            color={COLORS.primary}
+          />
         </View>
 
         <Text style={[styles.sectionTitle, { marginTop: 16 }]}>Dispatch Team ({dispatchUsers.length})</Text>
@@ -491,10 +532,10 @@ export default function OwnerDashboardScreen() {
         {stats.partiallyDispatched > 0 && (
           <>
             <Text style={[styles.sectionTitle, { marginTop: 16 }]}>In-Progress Orders</Text>
-            {queries.filter(q => q.status === STATUS.PARTIALLY_DISPATCHED).slice(0, 5).map(q => (
+            {scopedQueries.filter(q => q.status === STATUS.PARTIALLY_DISPATCHED).slice(0, 5).map(q => (
               <View key={q.id} style={[styles.alertCard, { borderLeftColor: COLORS.warning }]}>
                 <Text style={styles.alertTitle}>{q.customerName}</Text>
-                <Text style={styles.alertDesc}>{q.dispatchedSets || 0} / {q.requiredSets || 0} sets dispatched</Text>
+                <Text style={styles.alertDesc}>{q.cartoons || 0} cartons · {q.lots || 0} lots — partial</Text>
               </View>
             ))}
           </>
@@ -510,6 +551,7 @@ export default function OwnerDashboardScreen() {
           <Text style={styles.headerTitle}>Dashboard</Text>
           <Text style={styles.headerSubtitle}>Business Overview</Text>
         </View>
+        <GodownFilterChip compact style={{ marginRight: 8 }} />
         <NotificationBell style={{ marginRight: 8 }} />
         <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
           <Text style={styles.logoutText}>Logout</Text>

@@ -31,7 +31,8 @@ function aggregateCustomers(customers, queries) {
       category: c.category || 'D',
       priceLevel: c.priceLevel || 'Standard',
       parentGroup: c.parentGroup || '',
-      totalSetsSold: 0,
+      totalCartoons: 0,
+      totalLots: 0,
       totalSuccessful: 0,
       totalUnsuccessful: 0,
       lastOrderDate: null,
@@ -45,7 +46,8 @@ function aggregateCustomers(customers, queries) {
 
     if (EXPORT_WON_STATUSES.has(q.status)) {
       c.totalSuccessful += 1;
-      c.totalSetsSold += (q.requiredSets || q.setsSold || 0);
+      c.totalCartoons += (q.cartoons || 0);
+      c.totalLots += (q.lots || 0);
       const candidate = q.completedAt || q.wonAt || q.closedAt || null;
       if (candidate && (!c.lastOrderDate || candidate > c.lastOrderDate)) {
         c.lastOrderDate = candidate;
@@ -87,9 +89,8 @@ export async function exportQueries(queries, filterLabel = 'All') {
     'Customer Name': q.customerName || q.partyName || '',
     'Category': q.customerCategory || '',
     'Items': formatItemsList(q.items),
-    'Required Sets': q.requiredSets || q.quantityRequested || 0,
-    'Sets Sold': q.setsSold || '',
-    'Dispatched Sets': q.dispatchedSets || '',
+    'Cartons': q.cartoons || 0,
+    'Lots': q.lots || 0,
     'Projected Revenue': q.projectedRevenue || '',
     'Status': getStatusLabel(q.status),
     'Entered By': q.createdBy?.name || '',
@@ -118,47 +119,7 @@ export async function exportQueries(queries, filterLabel = 'All') {
 }
 
 /**
- * Export 2 — Parties Export (legacy, kept for backward compat)
- */
-export async function exportParties(parties, thresholdDays) {
-  if (!parties || parties.length === 0) {
-    throw new Error('No data to export.');
-  }
-  
-  const { getPartyStatus } = await import('../utils/timeUtils');
-  
-  const data = parties.map(p => {
-    const status = getPartyStatus(p.lastOrderDate, p.totalSetsSold, thresholdDays);
-    const statusLabel = status === 'active' ? 'Active' : status === 'gone_quiet' ? 'Gone Quiet' : 'New';
-    
-    return {
-      'Party Name': p.name || '',
-      'Category': p.category || '',
-      'Total Sets Sold': p.totalSetsSold || 0,
-      'Total Successful Orders': p.totalSuccessful || 0,
-      'Total Unsuccessful': p.totalUnsuccessful || 0,
-      'Last Order Date': p.lastOrderDate ? formatDateOnly(p.lastOrderDate) : '',
-      'Status': statusLabel,
-      'Notes': p.notes || '',
-      'Date Added': p.createdAt ? formatDateOnly(p.createdAt) : '',
-    };
-  });
-  
-  const ws = XLSX.utils.json_to_sheet(data);
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Parties');
-  
-  const colWidths = Object.keys(data[0]).map(key => ({
-    wch: Math.max(key.length, ...data.map(row => String(row[key]).length)) + 2,
-  }));
-  ws['!cols'] = colWidths;
-  
-  const filename = `Parties_Export_${formatDateForFilename()}.xlsx`;
-  return saveAndShareExcel(wb, filename);
-}
-
-/**
- * Export 3 — Salesperson Performance / Leaderboard Export
+ * Export 2 — Salesperson Performance / Leaderboard Export
  */
 export async function exportLeaderboard(leaderboardData, periodLabel = 'AllTime') {
   if (!leaderboardData || leaderboardData.length === 0) {
@@ -168,7 +129,8 @@ export async function exportLeaderboard(leaderboardData, periodLabel = 'AllTime'
   const data = leaderboardData.map(s => ({
     'Rank': s.rank || '',
     'Salesperson Name': s.name || '',
-    'Total Sets Sold': s.totalSetsSold || 0,
+    'Total Cartons': s.totalCartoons || 0,
+    'Total Lots': s.totalLots || 0,
     'Total Successful': s.totalSuccessful || 0,
     'Total Unsuccessful': s.totalUnsuccessful || 0,
     'Success Rate %': s.totalClaimed > 0
@@ -208,9 +170,8 @@ export async function exportAll(queries, customers, leaderboardData, thresholdDa
       'Customer Name': q.customerName || q.partyName || '',
       'Category': q.customerCategory || '',
       'Items': formatItemsList(q.items),
-      'Required Sets': q.requiredSets || q.quantityRequested || 0,
-      'Sets Sold': q.setsSold || '',
-      'Dispatched Sets': q.dispatchedSets || '',
+      'Cartons': q.cartoons || 0,
+      'Lots': q.lots || 0,
       'Projected Revenue': q.projectedRevenue || '',
       'Status': getStatusLabel(q.status),
       'Entered By': q.createdBy?.name || '',
@@ -231,14 +192,17 @@ export async function exportAll(queries, customers, leaderboardData, thresholdDa
   if (customers && customers.length > 0) {
     const aggregated = aggregateCustomers(customers, queries);
     const customersData = aggregated.map(c => {
-      const status = getPartyStatus(c.lastOrderDate, c.totalSetsSold, thresholdDays);
+      // Pass cartoons+lots into the gone-quiet check (treats a non-zero total
+      // as historical activity, same intent as the old totalSetsSold input).
+      const status = getPartyStatus(c.lastOrderDate, (c.totalCartoons + c.totalLots), thresholdDays);
       const statusLabel = status === 'active' ? 'Active' : status === 'gone_quiet' ? 'Gone Quiet' : 'New';
       return {
         'Name': c.name,
         'Category': c.category,
         'Price Level': c.priceLevel,
         'Parent Group': c.parentGroup,
-        'Total Sets Sold': c.totalSetsSold,
+        'Total Cartons': c.totalCartoons,
+        'Total Lots': c.totalLots,
         'Total Successful': c.totalSuccessful,
         'Total Unsuccessful': c.totalUnsuccessful,
         'Last Order Date': c.lastOrderDate ? formatDateOnly(c.lastOrderDate) : '',
@@ -254,7 +218,8 @@ export async function exportAll(queries, customers, leaderboardData, thresholdDa
     const lbData = leaderboardData.map(s => ({
       'Rank': s.rank || '',
       'Salesperson Name': s.name || '',
-      'Total Sets Sold': s.totalSetsSold || 0,
+      'Total Cartons': s.totalCartoons || 0,
+      'Total Lots': s.totalLots || 0,
       'Total Successful': s.totalSuccessful || 0,
       'Total Unsuccessful': s.totalUnsuccessful || 0,
       'Success Rate %': s.totalClaimed > 0

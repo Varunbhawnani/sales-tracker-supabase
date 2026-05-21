@@ -4,6 +4,7 @@ import {
 } from 'react-native';
 import { COLORS, STATUS, SAFE_TOP } from '../utils/constants';
 import { useAuth } from '../contexts/AuthContext';
+import { useGodownFilter } from '../contexts/GodownFilterContext';
 import { subscribeToQueriesByStatuses, markDispatched, undoDispatched } from '../services/queryService';
 import StatusBadge from '../components/StatusBadge';
 import TierBadge from '../components/TierBadge';
@@ -12,55 +13,70 @@ import EmptyState from '../components/EmptyState';
 import NotificationBell from '../components/NotificationBell';
 import Toast from 'react-native-toast-message';
 
-const DISPATCH_STATUSES = [STATUS.VERIFIED_PENDING_DISPATCH, STATUS.COMPLETED];
+// Mirror of PackingDashboardScreen but from the dispatch team's perspective.
+// "To Dispatch" is editable (items that have been packed). "In Packing" is
+// read-only — useful so dispatch knows what's coming next.
+const DISPATCH_VISIBLE_STATUSES = [STATUS.VERIFIED_PENDING_DISPATCH, STATUS.COMPLETED];
 const UNDO_WINDOW_MS = 3 * 60 * 1000;
 
 const TABS = [
-  { key: 'pending',   label: 'To Dispatch' },
-  { key: 'completed', label: 'Dispatched' },
+  { key: 'to_dispatch', label: 'To Dispatch' },
+  { key: 'in_packing',  label: 'In Packing (view only)' },
+  { key: 'completed',   label: 'Completed' },
 ];
 
-export default function DispatchDashboardScreen() {
+export default function DispatchDashboardScreen({ navigation }) {
   const { logout, userName } = useAuth();
+  const { filterQueries } = useGodownFilter();
   const [queries, setQueries] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [tab, setTab] = useState('pending');
+  const [tab, setTab] = useState('to_dispatch');
   const [, setTick] = useState(0);
 
   useEffect(() => {
-    const unsub = subscribeToQueriesByStatuses(DISPATCH_STATUSES, (data) => {
+    const unsub = subscribeToQueriesByStatuses(DISPATCH_VISIBLE_STATUSES, (data) => {
       setQueries(data);
       setLoading(false);
       setRefreshing(false);
     });
-    const interval = setInterval(() => setTick(t => t + 1), 5000);
+    const interval = setInterval(() => setTick((t) => t + 1), 5000);
     return () => { unsub(); clearInterval(interval); };
   }, []);
 
-  // Only show queries where packing is done.
-  const filtered = useMemo(() => {
-    if (tab === 'pending') return queries.filter(q => q.status === STATUS.VERIFIED_PENDING_DISPATCH && q.isPacked);
-    if (tab === 'completed') return queries.filter(q => q.status === STATUS.COMPLETED);
-    return queries;
-  }, [queries, tab]);
+  // Same godown scope as the packing dashboard — applied once, every tab
+  // derives from it.
+  const scopedQueries = useMemo(() => filterQueries(queries), [queries, filterQueries]);
+  const toDispatch = useMemo(
+    () => scopedQueries.filter(q => q.status === STATUS.VERIFIED_PENDING_DISPATCH && q.isPacked),
+    [scopedQueries],
+  );
+  const inPacking = useMemo(
+    () => scopedQueries.filter(q => q.status === STATUS.VERIFIED_PENDING_DISPATCH && !q.isPacked),
+    [scopedQueries],
+  );
+  const completed = useMemo(
+    () => scopedQueries.filter(q => q.status === STATUS.COMPLETED),
+    [scopedQueries],
+  );
 
-  const stats = useMemo(() => {
-    const pending = queries.filter(q => q.status === STATUS.VERIFIED_PENDING_DISPATCH && q.isPacked).length;
-    const completed = queries.filter(q => q.status === STATUS.COMPLETED).length;
-    return { pending, completed };
-  }, [queries]);
-
-  const tabsWithCounts = TABS.map(t => ({
+  const tabsWithCounts = TABS.map((t) => ({
     ...t,
-    count: t.key === 'pending' ? stats.pending : stats.completed,
+    count:
+      t.key === 'to_dispatch' ? toDispatch.length
+      : t.key === 'in_packing' ? inPacking.length
+      : completed.length,
   }));
 
-  const handleToggle = async (q) => {
+  const list = tab === 'to_dispatch' ? toDispatch
+    : tab === 'in_packing' ? inPacking
+    : completed;
+
+  const handleDispatchToggle = async (q) => {
     try {
       if (q.status === STATUS.COMPLETED) {
         await undoDispatched(q.id);
-        Toast.show({ type: 'info', text1: 'Undone — back to "To Dispatch"', position: 'bottom' });
+        Toast.show({ type: 'info', text1: 'Undone — back to To Dispatch', position: 'bottom' });
       } else {
         await markDispatched(q.id);
         Toast.show({ type: 'success', text1: 'Marked dispatched', text2: '3 min to undo', position: 'bottom' });
@@ -80,19 +96,47 @@ export default function DispatchDashboardScreen() {
   if (loading) return null;
 
   const renderItem = ({ item }) => {
-    const completed = item.status === STATUS.COMPLETED;
-    const dispMsAgo = item.dispatchedAt ? (Date.now() - item.dispatchedAt.getTime()) : 0;
-    const undoLeftMs = Math.max(0, UNDO_WINDOW_MS - dispMsAgo);
-    const canUndo = completed && undoLeftMs > 0;
-    const locked = completed && undoLeftMs === 0;
+    let actionEl = null;
+
+    if (tab === 'to_dispatch') {
+      actionEl = (
+        <TouchableOpacity style={[styles.toggleBtn, styles.dispatchBtn]} onPress={() => handleDispatchToggle(item)}>
+          <Text style={styles.dispatchText}>✓ Mark Dispatched</Text>
+        </TouchableOpacity>
+      );
+    } else if (tab === 'in_packing') {
+      // Read-only: dispatch can see what packing is working on but not edit.
+      actionEl = (
+        <View style={[styles.toggleBtn, styles.viewOnlyBtn]}>
+          <Text style={styles.viewOnlyText}>📥 With packing (view only)</Text>
+        </View>
+      );
+    } else {
+      // Completed tab — show undo only if within window.
+      const dispMsAgo = item.dispatchedAt ? Date.now() - item.dispatchedAt.getTime() : 0;
+      const undoLeftMs = Math.max(0, UNDO_WINDOW_MS - dispMsAgo);
+      actionEl = undoLeftMs > 0 ? (
+        <TouchableOpacity style={[styles.toggleBtn, styles.undoBtn]} onPress={() => handleDispatchToggle(item)}>
+          <Text style={styles.undoText}>↩ Undo (locks in {Math.ceil(undoLeftMs / 1000)}s)</Text>
+        </TouchableOpacity>
+      ) : (
+        <View style={[styles.toggleBtn, styles.lockedBtn]}>
+          <Text style={styles.lockedText}>🔒 Locked — order complete</Text>
+        </View>
+      );
+    }
+
     return (
-      <View style={[styles.card, completed && styles.cardCompleted]}>
+      <View style={[styles.card, item.status === STATUS.COMPLETED && styles.cardCompleted]}>
         <View style={styles.cardTop}>
           <StatusBadge status={item.status} />
-          {completed && (
+          {tab === 'completed' && (
             <Text style={[styles.metaText, { color: COLORS.completed }]}>
               ✅ Dispatched{item.dispatchedByName ? ` by ${item.dispatchedByName}` : ''}
             </Text>
+          )}
+          {tab === 'to_dispatch' && (
+            <Text style={[styles.metaText, { color: COLORS.completed }]}>📦 Packed</Text>
           )}
         </View>
         <View style={styles.nameRow}>
@@ -109,21 +153,7 @@ export default function DispatchDashboardScreen() {
           <Text style={styles.metaText}>Packed by: {item.packedByName}</Text>
         )}
 
-        {completed ? (
-          canUndo ? (
-            <TouchableOpacity style={[styles.toggleBtn, styles.undoBtn]} onPress={() => handleToggle(item)}>
-              <Text style={styles.undoText}>↩ Undo (locks in {Math.ceil(undoLeftMs/1000)}s)</Text>
-            </TouchableOpacity>
-          ) : (
-            <View style={[styles.toggleBtn, styles.lockedBtn]}>
-              <Text style={styles.lockedText}>🔒 Locked — order complete</Text>
-            </View>
-          )
-        ) : (
-          <TouchableOpacity style={[styles.toggleBtn, styles.dispatchBtn]} onPress={() => handleToggle(item)}>
-            <Text style={styles.dispatchText}>✓ Mark Dispatched</Text>
-          </TouchableOpacity>
-        )}
+        {actionEl}
       </View>
     );
   };
@@ -135,6 +165,12 @@ export default function DispatchDashboardScreen() {
           <Text style={styles.headerTitle}>Dispatch Dashboard</Text>
           <Text style={styles.headerSubtitle}>Hi, {userName || 'User'}</Text>
         </View>
+        <TouchableOpacity
+          style={styles.logoutBtn}
+          onPress={() => navigation?.navigate?.('Responsibilities')}
+        >
+          <Text style={styles.logoutText}>📋 My Role</Text>
+        </TouchableOpacity>
         <NotificationBell style={{ marginRight: 8 }} />
         <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
           <Text style={styles.logoutText}>Logout</Text>
@@ -142,19 +178,44 @@ export default function DispatchDashboardScreen() {
       </View>
 
       <View style={styles.statsRow}>
-        <View style={styles.statBox}><Text style={styles.statValue}>{stats.pending}</Text><Text style={styles.statLabel}>To Dispatch</Text></View>
-        <View style={styles.statBox}><Text style={[styles.statValue, { color: COLORS.completed }]}>{stats.completed}</Text><Text style={styles.statLabel}>Completed</Text></View>
+        <View style={styles.statBox}>
+          <Text style={styles.statValue}>{toDispatch.length}</Text>
+          <Text style={styles.statLabel}>To Dispatch</Text>
+        </View>
+        <View style={styles.statBox}>
+          <Text style={[styles.statValue, { color: COLORS.warning }]}>{inPacking.length}</Text>
+          <Text style={styles.statLabel}>In Packing</Text>
+        </View>
+        <View style={styles.statBox}>
+          <Text style={[styles.statValue, { color: COLORS.completed }]}>{completed.length}</Text>
+          <Text style={styles.statLabel}>Completed</Text>
+        </View>
       </View>
 
       <FilterTabs tabs={tabsWithCounts} activeTab={tab} onTabChange={setTab} />
 
       <FlatList
-        data={filtered}
+        data={list}
         keyExtractor={(it) => it.id}
         renderItem={renderItem}
-        contentContainerStyle={[styles.list, filtered.length === 0 && styles.emptyList]}
-        ListEmptyComponent={<EmptyState title="All clear!" message={tab === 'pending' ? 'Nothing waiting to dispatch.' : 'Nothing dispatched yet.'} />}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); setTimeout(() => setRefreshing(false), 800); }} colors={[COLORS.primary]} />}
+        contentContainerStyle={[styles.list, list.length === 0 && styles.emptyList]}
+        ListEmptyComponent={
+          <EmptyState
+            title="All clear!"
+            message={
+              tab === 'to_dispatch' ? 'Nothing waiting to dispatch.'
+              : tab === 'in_packing' ? 'Nothing currently with packing.'
+              : 'Nothing dispatched yet.'
+            }
+          />
+        }
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => { setRefreshing(true); setTimeout(() => setRefreshing(false), 800); }}
+            colors={[COLORS.primary]}
+          />
+        }
         showsVerticalScrollIndicator={false}
       />
     </View>
@@ -191,4 +252,6 @@ const styles = StyleSheet.create({
   undoText: { fontSize: 13, fontFamily: 'Inter_600SemiBold', color: COLORS.textSecondary },
   lockedBtn: { backgroundColor: COLORS.background },
   lockedText: { fontSize: 12, fontFamily: 'Inter_500Medium', color: COLORS.textTertiary },
+  viewOnlyBtn: { backgroundColor: COLORS.background, borderWidth: 1, borderColor: COLORS.divider },
+  viewOnlyText: { fontSize: 12, fontFamily: 'Inter_500Medium', color: COLORS.textTertiary },
 });

@@ -14,10 +14,12 @@ import MyStatsScreen from '../screens/MyStatsScreen';
 import OwnerDashboardScreen from '../screens/OwnerDashboardScreen';
 import AdminScreen from '../screens/AdminScreen';
 import AccountsDashboardScreen from '../screens/AccountsDashboardScreen';
+import PackingDashboardScreen from '../screens/PackingDashboardScreen';
 import DispatchDashboardScreen from '../screens/DispatchDashboardScreen';
 import FollowUpsScreen from '../screens/FollowUpsScreen';
-import PackingDashboardScreen from '../screens/PackingDashboardScreen';
 import TasksScreen from '../screens/TasksScreen';
+import ResponsibilitiesScreen from '../screens/ResponsibilitiesScreen';
+import GodownFilterChip from '../components/GodownFilterChip';
 
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
@@ -30,6 +32,7 @@ function FeedStack() {
       <Stack.Screen name="FeedMain" component={FeedScreen} />
       <Stack.Screen name="NewQuery" component={NewQueryScreen} options={{ headerShown: true, headerTitle: 'New Query', headerTintColor: COLORS.primary, headerStyle: { backgroundColor: COLORS.surface } }} />
       <Stack.Screen name="QueryDetail" component={QueryDetailScreen} options={{ headerShown: true, headerTitle: 'Query Details', headerTintColor: COLORS.primary, headerStyle: { backgroundColor: COLORS.surface } }} />
+      <Stack.Screen name="Responsibilities" component={ResponsibilitiesScreen} />
     </Stack.Navigator>
   );
 }
@@ -37,10 +40,40 @@ function LeaderboardStack() { return <Stack.Navigator screenOptions={{ headerSho
 function MyStatsStack()    { return <Stack.Navigator screenOptions={{ headerShown: false }}><Stack.Screen name="MyStatsMain" component={MyStatsScreen} /></Stack.Navigator>; }
 function DashboardStack()  { return <Stack.Navigator screenOptions={{ headerShown: false }}><Stack.Screen name="DashboardMain" component={OwnerDashboardScreen} /></Stack.Navigator>; }
 function AdminStack()      { return <Stack.Navigator screenOptions={{ headerShown: false }}><Stack.Screen name="AdminMain" component={AdminScreen} /></Stack.Navigator>; }
-function AccountsStack()   { return <Stack.Navigator screenOptions={{ headerShown: false }}><Stack.Screen name="AccountsMain" component={AccountsDashboardScreen} /></Stack.Navigator>; }
-function DispatchStack()   { return <Stack.Navigator screenOptions={{ headerShown: false }}><Stack.Screen name="DispatchMain" component={DispatchDashboardScreen} /></Stack.Navigator>; }
-function PackingStack()    { return <Stack.Navigator screenOptions={{ headerShown: false }}><Stack.Screen name="PackingMain" component={PackingDashboardScreen} /></Stack.Navigator>; }
-function TasksStack()      { return <Stack.Navigator screenOptions={{ headerShown: false }}><Stack.Screen name="TasksMain" component={TasksScreen} /></Stack.Navigator>; }
+// Each role's stack also includes a Responsibilities screen so the header
+// button on the main dashboard can push into it without a separate tab.
+function AccountsStack() {
+  return (
+    <Stack.Navigator screenOptions={{ headerShown: false }}>
+      <Stack.Screen name="AccountsMain" component={AccountsDashboardScreen} />
+      <Stack.Screen name="Responsibilities" component={ResponsibilitiesScreen} />
+    </Stack.Navigator>
+  );
+}
+function PackingStack() {
+  return (
+    <Stack.Navigator screenOptions={{ headerShown: false }}>
+      <Stack.Screen name="PackingMain" component={PackingDashboardScreen} />
+      <Stack.Screen name="Responsibilities" component={ResponsibilitiesScreen} />
+    </Stack.Navigator>
+  );
+}
+function DispatchStack() {
+  return (
+    <Stack.Navigator screenOptions={{ headerShown: false }}>
+      <Stack.Screen name="DispatchMain" component={DispatchDashboardScreen} />
+      <Stack.Screen name="Responsibilities" component={ResponsibilitiesScreen} />
+    </Stack.Navigator>
+  );
+}
+function TasksStack() {
+  return (
+    <Stack.Navigator screenOptions={{ headerShown: false }}>
+      <Stack.Screen name="TasksMain" component={TasksScreen} />
+      <Stack.Screen name="Responsibilities" component={ResponsibilitiesScreen} />
+    </Stack.Navigator>
+  );
+}
 function FollowUpsStack() {
   return (
     <Stack.Navigator screenOptions={{ headerShown: false }}>
@@ -53,7 +86,8 @@ function FollowUpsStack() {
 // ─── Tab icons ──────────────────────────────────────────────────────────────
 const TAB_ICONS = {
   Feed: '📋', Leaderboard: '🏆', 'My Stats': '📊',
-  Dashboard: '📈', Admin: '⚙️', Accounts: '📑', Dispatch: '📦', Packing: '📥',
+  Dashboard: '📈', Admin: '⚙️', Accounts: '📑',
+  Packing: '📥', Dispatch: '📦',
   'Follow-Ups': '🔁', Tasks: '🗒',
 };
 
@@ -108,6 +142,8 @@ function WebShell({ tabs, defaultTabName }) {
         </TouchableOpacity>
         <Text style={webStyles.brand}>Sales Tracker</Text>
         <View style={{ flex: 1 }} />
+        {/* Owner-only godown filter — controls what every screen shows. */}
+        <GodownFilterChip style={{ marginRight: 12 }} />
         {userName ? (
           <Text style={webStyles.greeting}>Hi, {userName}</Text>
         ) : null}
@@ -264,14 +300,18 @@ function getTabsForRole(role) {
         { name: 'Accounts', component: AccountsStack },
         { name: 'Tasks',    component: TasksStack },
       ];
+    // Legacy 'operations' users land on the packing dashboard until the
+    // owner manually reassigns them. The dashboard still shows them their
+    // queue + a read-only view of dispatch.
+    case ROLES.PACKING:
+    case ROLES.OPERATIONS:
+      return [
+        { name: 'Packing', component: PackingStack },
+        { name: 'Tasks',   component: TasksStack },
+      ];
     case ROLES.DISPATCH:
       return [
         { name: 'Dispatch', component: DispatchStack },
-        { name: 'Tasks',    component: TasksStack },
-      ];
-    case ROLES.PACKING:
-      return [
-        { name: 'Packing',  component: PackingStack },
         { name: 'Tasks',    component: TasksStack },
       ];
     case ROLES.OWNER:

@@ -1,687 +1,683 @@
 # Sales Tracker — Supabase Edition
 
-A complete sales-tracking ERP for a shoe distribution business. Salespersons log customer queries (online/offline), claim them, mark them booked/lost. Accounts verifies invoices against Tally Prime — supporting **multi-invoice queries**. **Packing team** packs the order. **Dispatch** ships it. Owner sees everything. Roles can assign **tasks** to each other; **follow-ups** roll up across the team.
+A sales-tracking ERP for a shoe distribution business. Salespeople log customer queries (online / offline), claim them, mark them booked / lost in **cartons + lots**. Accounts verifies invoices against Tally Prime (multi-invoice with a 3-try lock). **Packing** packs the order, **Dispatch** ships it — each team sees the other's queue read-only. The owner has a full view of the pipeline and can scope the whole app to any **godown**; non-owner users automatically only see queries from their own godown. Anyone can assign **tasks** (one-time or recurring) to anyone else; **follow-ups** roll up across the team with an optional date and pick-up-to-rework flow.
 
-Runs as a **mobile app (Android, iOS) and a web app** from one codebase (React Native + Expo). Data lives in **Supabase (PostgreSQL)**. Tally Prime integration happens through two small Node.js scripts running on the Windows machine where Tally is installed.
-
-This is the **Supabase port** of an older Firebase version, extended through Segments A–J with: cartoons/lots as the unit model, follow-ups, multi-invoice verification with a 3-try lock, a Packing portal with 3-min undo, 15-day visibility cutoff, and a 2-way task assignment system. See [Segments A–J overview](#segments-aj--what-was-added-on-top-of-the-firebase-original).
+Runs as a **mobile app (Android, iOS) and a web app** from one codebase (React Native + Expo). Data lives in **Supabase (PostgreSQL)**. Tally Prime integration runs as two Node.js scripts on the Windows server where Tally is installed.
 
 ---
 
 ## Table of contents
 
 1. [What the system does](#1-what-the-system-does)
-2. [Architecture / how everything connects](#2-architecture--how-everything-connects)
-3. [File layout](#3-file-layout)
-4. [Tech stack](#4-tech-stack)
-5. [Database design](#5-database-design)
-6. [The state workflow](#6-the-state-workflow)
-7. [Segments A–J — what was added on top of the Firebase original](#segments-aj--what-was-added-on-top-of-the-firebase-original)
-8. [Caching & delta-sync (how the app stays fast)](#7-caching--delta-sync-how-the-app-stays-fast)
-8. [Realtime updates — how the app stays in sync across devices](#8-realtime-updates--how-the-app-stays-in-sync-across-devices)
-9. [In-app notifications (the bell)](#9-in-app-notifications-the-bell)
-10. [Safeguards: 5-try invoice lock, party-name cross-check, duplicate-invoice dedup](#10-safeguards-5-try-invoice-lock-party-name-cross-check-duplicate-invoice-dedup)
-11. [Setup — one-time, end-to-end](#11-setup--one-time-end-to-end)
-12. [Deploying for your team (web + mobile)](#12-deploying-for-your-team-web--mobile)
-13. [Day-to-day operations](#13-day-to-day-operations)
-14. [Optional: PM2 auto-restart, Windows auto-login, etc.](#14-optional-pm2-auto-restart-windows-auto-login-etc)
-15. [Tally pricing — known limitation in your setup](#15-tally-pricing--known-limitation-in-your-setup)
-16. [Other known limitations & edge cases](#16-other-known-limitations--edge-cases)
-17. [Troubleshooting](#17-troubleshooting)
-18. [Files to know](#18-files-to-know)
+2. [Roles & dashboards](#2-roles--dashboards)
+3. [Godowns — how scoping works](#3-godowns--how-scoping-works)
+4. [Architecture](#4-architecture)
+5. [State workflow](#5-state-workflow)
+6. [Database schema](#6-database-schema)
+7. [Realtime updates](#7-realtime-updates)
+8. [Caching strategy](#8-caching-strategy)
+9. [Tally integration](#9-tally-integration)
+10. [Tally setup on your cloud Windows server (RDP)](#10-tally-setup-on-your-cloud-windows-server-rdp)
+11. [PM2 setup so the scripts survive reboots](#11-pm2-setup-so-the-scripts-survive-reboots)
+12. [Day-to-day operations](#12-day-to-day-operations)
+13. [Deploying changes (web + mobile OTA)](#13-deploying-changes-web--mobile-ota)
+14. [Supabase free-tier usage — where you stand and when to upgrade](#14-supabase-free-tier-usage--where-you-stand-and-when-to-upgrade)
+15. [Troubleshooting](#15-troubleshooting)
+16. [File layout](#16-file-layout)
 
 ---
 
 ## 1. What the system does
 
-A salesperson is in front of a customer (or on a call). The customer says they want 50 cartoons and 5 lots of shoes. The salesperson:
+1. Salesperson opens the app, picks Online or Offline, picks a customer (synced from Tally Sundry Debtors), types a mandatory note, optionally tags products, **picks a godown** (defaults to their own), and submits. The query lands in the live Feed for everyone in that godown.
+2. Someone in the same godown claims the query. When booked, they tap **Mark Booked** and enter **cartons + lots** (two separate quantities), plus an optional follow-up note + optional follow-up date.
+3. **Accounts** (in the same godown) sees the booked query, enters one or more Tally invoice numbers, and the system auto-verifies each against Tally's Day Book within seconds. Cross-checks the customer name. Rejects duplicate invoice numbers. **3 failed attempts** locks the query — the owner unlocks it or flags it back.
+4. Once every invoice is verified and the cartons + lots cover the query total, the query moves to **Packing**. Packing team marks it Packed (3-minute undo). Then **Dispatch** sees it on their dashboard and marks it Dispatched (3-minute undo). Each team can see the *other* team's queue as read-only context.
+5. Salespeople get a **Follow-Ups** tab. Each unresolved follow-up lists by upcoming date. Tap **Pick Up** to convert the follow-up back into a workable query — it returns to `claimed_by_sales` and the three actions (Mark Booked / Snooze / Cancel) are available again.
+6. Anyone can **assign tasks** to anyone else. Tasks support: one-time / every N days / specific weekdays / day-of-month, with optional start + end dates. Notifications fire on assign + 5 PM + 6 PM of the due date.
+7. **Owner** sees the entire pipeline. From a single godown chip in the top bar, the owner can switch the whole app to view a specific godown — Feed, Dashboard, Leaderboard, Follow-Ups all scope to that godown's queries. "All Godowns" shows everything.
+8. **Admin** also manages "Role Responsibilities" — per-role lists of duties with multi-step checklists that every user of that role sees as guidance via the 📋 button in their header.
 
-1. Opens the app, picks **Online or Offline** as the query's origin.
-2. Picks the customer from a dropdown (data flowing from Tally Sundry Debtors).
-3. Types a mandatory note about what the customer asked for. Optionally tags products.
-4. Submits — the query lands in the Feed for everyone to see.
-5. Same salesperson (or another) claims it. They negotiate. If booked, they tap **Mark Booked** and enter **cartoons + lots** (two separate quantities) — and optionally an open follow-up note.
-6. Accounts sees the booked query, enters **one or more Tally invoice numbers** (a single query can have many invoice entries). They also enter cartoons/lots per invoice; they can edit cartoons/lots inline as the order shape firms up.
-7. The system auto-verifies each invoice against Tally within seconds. Cross-checks party name. Rejects duplicates across queries. After **3 failed attempts on a single entry**, accounts is locked out — owner has to unlock or flag back to sales.
-8. Once every invoice entry is verified and their cartoons + lots cover the query total, the query moves to the **Packing** portal. Packing toggles **Packed** when done. Within 3 minutes they can undo; after that it's locked.
-9. **Dispatch** sees the packed query, toggles **Dispatched** when it leaves the warehouse. Same 3-minute undo, same lock.
-10. Salespersons get a cross-cutting **Follow-Ups** tab covering any unresolved follow-up (whether from a Mark Booked note, a Snooze, or otherwise). They mark each follow-up resolved as they handle it.
-11. Anyone can be **assigned tasks** by anyone else (admin ↔ all roles). The Tasks tab shows Inbox / Sent. Toggle complete when done.
-12. Owner sees the entire pipeline at a glance: open, accounts, packing, dispatch, completed, lost — plus packing team throughput.
-
-The whole flow is visible to the owner. Each step is gated by role (salesperson can't act as accounts, etc.) via Row-Level Security in Postgres. To keep the Feed focused, **queries older than 15 days drop out** of every list (except the Follow-Ups tab, which always shows anything unresolved).
+Queries older than 15 days drop out of every list (except Follow-Ups). Salesperson's view caps completed queries to the most recent 10 to keep the feed focused.
 
 ---
 
-## 2. Architecture / how everything connects
+## 2. Roles & dashboards
 
-```
-   ┌─────────────────────────────────┐
-   │  Salesperson / Accounts /       │
-   │  Dispatch / Owner (humans)      │
-   └────────────┬────────────────────┘
-                │  log in
-                ▼
-   ┌─────────────────────────────────┐         ┌──────────────────────┐
-   │  Mobile app (Expo Go / APK)     │         │  Web app (browser)   │
-   │  + cached customer/product list │◄───────►│  (same React code,   │
-   └────────────┬────────────────────┘         │   served from Vercel)│
-                │                              └──────────┬───────────┘
-                │  authenticated requests                 │
-                ▼                                         ▼
-            ┌───────────────────────────────────────────────────┐
-            │             SUPABASE (cloud, free tier)           │
-            │  ┌──────────────────────────────────────────────┐ │
-            │  │ Postgres tables:                             │ │
-            │  │   users, queries, customers_master,          │ │
-            │  │   products_master, salesperson_stats,        │ │
-            │  │   settings                                   │ │
-            │  │                                              │ │
-            │  │ Row-Level Security: enforces role rules      │ │
-            │  │ RPC functions: claim_query, mark_won,        │ │
-            │  │   submit_invoice, update_dispatched, ...     │ │
-            │  │                                              │ │
-            │  │ Realtime: pushes row changes to subscribers  │ │
-            │  └──────────────────────────────────────────────┘ │
-            └───────────────────────────────────────────────────┘
-                       ▲                          ▲
-                       │ writes verified-status   │ writes customer +
-                       │ on each invoice          │ product master data
-                       │                          │
-            ┌──────────┴──────────┐   ┌──────────┴──────────┐
-            │  tally-bridge.js    │   │  tally-sync.js      │
-            │  (Realtime listener │   │  (5-min cron)       │
-            │   for pending       │   │                     │
-            │   verifications)    │   │                     │
-            └──────────┬──────────┘   └──────────┬──────────┘
-                       │                          │
-                       │  XML over HTTP           │
-                       ▼                          ▼
-            ┌─────────────────────────────────────────────────┐
-            │  WINDOWS MACHINE (the "cloud server")           │
-            │                                                 │
-            │  ┌──────────────────────────────┐               │
-            │  │ Tally Prime (always open,    │               │
-            │  │ company file loaded, HTTP    │               │
-            │  │ port 9003 listening)         │               │
-            │  └──────────────────────────────┘               │
-            └─────────────────────────────────────────────────┘
-```
-
-**Three things must always be running:**
-- **Tally Prime** with your company file loaded, HTTP port open (usually `9003`).
-- **`tally-bridge.js`** — listens to Supabase for pending verifications, talks to Tally, writes the result back.
-- **`tally-sync.js`** — every 5 minutes, pulls customer + stock-item changes from Tally and upserts them into Supabase.
-
-Without these, the app still works for create/claim/won — but invoice verification stops, and new customers/products you add in Tally don't appear in the dropdown.
-
----
-
-## 3. File layout
-
-```
-sales-tracker-supabase/
-├── README.md                     ← this file
-├── SUPABASE_SETUP.md             ← step-by-step Supabase setup
-├── package.json
-├── app.json
-├── eas.json                      ← EAS build profiles (Android/iOS)
-├── .env.example                  ← template for Supabase + Tally env vars
-├── .env                          ← (you create this, never committed)
-├── .gitignore
-├── App.js                        ← app entry point
-├── index.js                      ← Expo registers the root component here
-│
-├── supabase/                     ← the backend
-│   ├── migrations/  (apply IN ORDER in Supabase SQL Editor)
-│   │   ├── 001_initial_schema.sql          (tables, enums, indexes)
-│   │   ├── 002_rls_policies.sql            (Row-Level Security per role)
-│   │   ├── 003_functions_and_triggers.sql  (atomic state-machine RPCs)
-│   │   ├── 004_invoice_dedup.sql           (unique partial index — no two queries can verify with the same invoice)
-│   │   ├── 005_admin_create_user.sql       (Postgres-side user creation — bypasses signup/email)
-│   │   ├── 006_invoice_attempt_lock.sql    (5-try lock on invoice verification + admin-reset RPC)
-│   │   ├── 007_fix_dispatch_cast.sql       (enum cast fix in update_dispatched_sets)
-│   │   ├── 008_enable_realtime.sql         (adds every table to supabase_realtime publication)
-│   │   ├── 009_notifications.sql           (notifications table + trigger + bell-style RLS)
-│   │   ├── 010_admin_can_claim.sql         (owner can claim queries directly)
-│   │   ├── 011_query_origin.sql            (Online/Offline origin column on queries)
-│   │   ├── 012_cartoons_lots_followups.sql (cartoons + lots columns; follow_up_* fields; rewrites mark_won / snooze_query / mark_lost_cancelled / adds resolve_follow_up)
-│   │   ├── 013_multi_invoice.sql           (invoice_entries JSONB + add_invoice_entry + accounts_update_quantity; 3-try lock; per-entry verification & duplicate rejection)
-│   │   ├── 014_packing_flow.sql            (packing role; is_packed flag; mark_packed / undo_packed / mark_dispatched / undo_dispatched RPCs)
-│   │   ├── 015_tasks.sql                   (tasks table, RLS, create_task / toggle_task RPCs, notification trigger)
-│   │   └── 016_fix_markwon_ambiguity.sql   (renames mark_won parameter to p_follow_up_note to disambiguate from queries.follow_up_note column)
-│   ├── seed.sql                  ← optional starter data
-│   └── README.md                 ← what each migration does
-│
-├── src/
-│   ├── lib/
-│   │   └── supabase.js           ← Supabase client setup (web + native)
-│   ├── contexts/
-│   │   └── AuthContext.js        ← login, logout, session, role helpers
-│   ├── navigation/
-│   │   └── AppNavigator.js       ← top-bar + sidebar (web), bottom tabs (native)
-│   ├── services/
-│   │   ├── queryService.js       ← query CRUD + RPC calls (state machine, debounced realtime, AppState refresh, local event bus, 15-day cutoff, multi-invoice helpers, mark/undo packed/dispatched)
-│   │   ├── authService.js        ← user CRUD via admin_create_user RPC
-│   │   ├── masterDataService.js  ← cached customer/product list + delta sync
-│   │   ├── statsService.js       ← recomputes on-the-fly from queries.cartoons + queries.lots; week/month/year/all-time
-│   │   ├── tasksService.js       ← (new) subscribeToMyTasks / createTask / toggleTask
-│   │   ├── settingsService.js
-│   │   ├── exportService.js + exportShare.{native,web}.js
-│   │   ├── notificationService.js  ← Expo push tokens (mobile only — not currently used)
-│   │   └── notificationsService.js ← in-app bell notifications (the bell icon you see in headers)
-│   ├── screens/
-│   │   ├── LoginScreen.js
-│   │   ├── FeedScreen.js
-│   │   ├── NewQueryScreen.js               ← Online/Offline pills → customer → mandatory notes → optional products
-│   │   ├── QueryDetailScreen.js            ← Mark Booked / Snooze / Lost sheets; cartoons + lots; follow-up note
-│   │   ├── AccountsDashboardScreen.js      ← multi-invoice entries, per-entry verified/failed badges, edit cartoons/lots inline, 3-try lock UI
-│   │   ├── PackingDashboardScreen.js       ← (new) toggle to mark packed; 3-min undo countdown then lock
-│   │   ├── DispatchDashboardScreen.js      ← (rewritten) toggle to mark dispatched; 3-min undo then lock
-│   │   ├── FollowUpsScreen.js              ← (new) cross-portal feed of unresolved follow-ups (filter by booked/snoozed)
-│   │   ├── TasksScreen.js                  ← (new) Inbox / Sent tabs; new-task sheet; toggle complete
-│   │   ├── OwnerDashboardScreen.js         ← Pipeline incl. Packing; Packing-team throughput card; 5-fail lock unlock/flag-back
-│   │   ├── AdminScreen.js                  ← includes Packing role
-│   │   ├── LeaderboardScreen.js            ← Week / Month / Year / All-Time tabs; cartoons + lots
-│   │   └── MyStatsScreen.js                ← Week / Month / Year / All-Time tabs; cartoons + lots
-│   ├── components/               ← BottomSheet, StatusBadge, ProductSelector, NotificationBell, etc.
-│   └── utils/                    ← constants, formatUtils, timeUtils
-│
-└── tally/                              ← Windows-server scripts
-    ├── tally-bridge.js                  ← verifies invoices against Tally Day Book (with party-name cross-check, duplicate dedup, 5-try counter)
-    ├── tally-sync.js                    ← every 5 min pulls customer + product changes
-    ├── tally-price-debug.js             ← (diagnostic) inspect how prices live in your Tally
-    ├── tally-pricelist-debug.js         ← (diagnostic) safer follow-up — query stock groups
-    ├── tally-pricenested-debug.js       ← (diagnostic) targeted item-level price queries
-    ├── package.json                     ← scripts' own deps
-    ├── .env.example
-    ├── .env                             ← (you create this, never committed)
-    └── README.md                        ← Tally-side setup notes
-```
-
----
-
-## 4. Tech stack
-
-| Layer | Choice | Why |
+| Role | Tabs | What they do |
 |---|---|---|
-| **App framework** | React Native + Expo SDK 54 | Single codebase → Android, iOS, web. OTA updates. Free EAS Build tier. |
-| **Web rendering** | react-native-web | Same React Native components render to DOM. No separate web app needed. |
-| **Database** | Supabase Postgres (free tier) | Real SQL, no daily caps, generous free quota, easy auth + realtime built in. |
-| **Auth** | Supabase Auth (email/password) | Username → `username@salestracker.app` is the synthetic email format. |
-| **Realtime updates** | Supabase Realtime (Postgres changes channel) | Same UX as Firestore's `onSnapshot` but over Postgres logical replication. |
-| **State-machine logic** | Postgres SECURITY DEFINER functions | Atomic transitions can't be bypassed by a misbehaving client. |
-| **Access control** | Postgres Row-Level Security | Each role only sees / writes what their role allows. |
-| **Tally connector** | Custom Node.js + axios + fast-xml-parser | Talks to Tally's HTTP-XML API (port 9003) over the LAN. |
-| **Master-data cache** | AsyncStorage (mobile) / localStorage (web) | Last_synced timestamp watermark drives delta sync. |
-| **Web hosting** | Vercel free tier (or Netlify, Cloudflare Pages) | Static export from `npx expo export -p web`. |
-| **Mobile distribution** | EAS Build → APK / IPA + EAS Update OTA | Build once in cloud, share APK via WhatsApp. Future updates flow OTA. |
+| **Owner** | Feed, Follow-Ups, Tasks, Leaderboard, Dashboard, Admin | Sees everything. Scopes the whole app to any godown via the top-bar chip. Manages users, godowns, role responsibilities, SLAs. |
+| **Salesperson** | Feed, Follow-Ups, Tasks, Leaderboard, My Stats | Creates / claims / marks queries. Picks a godown when creating a query (defaults to their own). |
+| **Accounts** | Accounts, Tasks | Enters Tally invoice numbers, splits a query across multiple invoices, flags failures back to sales. Sees only their godown's queries. |
+| **Packing** | Packing, Tasks | "To Pack" tab editable + "In Dispatch" tab read-only. 3-min undo on Mark Packed. Sees only their godown's queries. |
+| **Dispatch** | Dispatch, Tasks | "To Dispatch" tab editable + "In Packing" tab read-only + Completed. 3-min undo on Mark Dispatched. Sees only their godown's queries. |
+
+Stats screens (Leaderboard, My Stats) are **NOT** godown-scoped for non-owners — the whole sales team appears on the leaderboard, regardless of which godown each person is in.
 
 ---
 
-## 5. Database design
+## 3. Godowns — how scoping works
 
-Tables — all snake_case in DB; the service layer maps to camelCase before screens see it.
+A godown is a warehouse / branch. Each user *optionally* has a `godown_id`. Each query (new ones, post-migration 019) *optionally* has a `godown_id`. The matching rule is uniform across roles:
 
-### `users`
-One row per human who can log in. References `auth.users.id`. Holds name, username, email, **role** (one of `owner`, `salesperson`, `accounts`, `packing`, `dispatch`), is_active, expo_push_token, gamification.
+**A query is visible to a non-owner user if:**
+- The user has no godown assigned (= "see all"), OR
+- The query has no godown (= "visible to all"), OR
+- The user's godown matches the query's godown.
 
-### `customers_master`
-Mirror of Tally's Sundry Debtors. Keyed by GUID (Tally's stable identifier). Includes `tally_alter_id` (delta watermark), `category` (A/B/C/D customer grade), `price_level` (which price tier this customer gets), `last_synced` (read-side delta watermark).
+**The owner** always sees every query, narrowed by the top-bar chip:
+- **All Godowns** → everything
+- **Unassigned** → only queries with no godown
+- A specific godown → only queries tagged with that godown.
 
-### `products_master`
-Mirror of Tally's Stock Items. Keyed by GUID. Holds `price` and a JSONB `price_tiers` like `{OS: 231, OS1: 245, FO: 220}` — picked based on the customer's `price_level`.
+**On New Query**, the salesperson sees a Godown picker:
+- Defaults to their assigned godown.
+- Can override to any other godown, or pick "None" (visible to everyone).
+- Owner sees the picker too, with the same options.
 
-### `queries`
-The core table. One row per customer query. Columns track every state-machine field: who created it, who claimed it, what items, **origin** (`online`/`offline`), **cartoons + lots** (two quantities — not a single sets count), `last_activity_at` (drives the 15-day visibility cutoff), `invoice_entries` JSONB (an array of `{invoice_no, party_name, cartoons, lots, status, attempt_count, verified_at, failed_reason}` — one per accounts entry), `invoice_attempt_count` (3-try lock per entry), `is_packed` + `packed_at` + `packed_by`, `dispatched_at` + `dispatched_by`, follow-up fields (`follow_up_note`, `follow_up_origin` = `booked`/`snoozed`, `follow_up_resolved`), snooze history (JSONB array), gamification timings.
+What's **not** godown-scoped: the Leaderboard, My Stats, the in-app notification bell, the tasks list. These stay team-wide. Stats reflect everyone's work; tasks are person-to-person.
 
-### `tasks`
-One row per assigned task. Columns: `from_user`, `to_user`, `title`, `note`, `is_done`, `done_at`. RLS scoped so each user only sees tasks they sent or received.
-
-### `salesperson_stats`
-One row per salesperson. Cached counters: `total_claimed`, `total_successful`, `total_unsuccessful`, `total_sets_sold`. Updated atomically inside the RPC functions, never directly writable from the client.
-
-### `settings`
-Single row (`id = 'app'`). Holds the configurable thresholds: gone-quiet days, SLA targets for sales/accounts/dispatch escalation.
-
-### Indexes
-- `queries.status`, `queries.claimed_by_user_id` for the Feed filters.
-- `queries.last_activity_at` for the time-windowed leaderboard.
-- `queries.tally_invoice_number` with a **partial unique index** for `status IN (verified, partial, completed)` — defense against the duplicate-invoice bug at the DB level.
+What about pre-019 queries that have no `godown_id`? Per design, they fall into the "visible to all" bucket — nothing disappears when migration 019 runs.
 
 ---
 
-## 6. The state workflow
+## 4. Architecture
+
+```
+   ┌─────────────────────────────────────┐
+   │  Owner / Sales / Accounts /         │
+   │  Packing / Dispatch (humans)        │
+   └────────────────┬────────────────────┘
+                    │ log in
+                    ▼
+   ┌─────────────────────────────────┐    ┌──────────────────────┐
+   │  Mobile app (Android / iOS APK) │    │  Web app (browser)   │
+   │  + cached customer/product list │◄──►│  hosted on Vercel    │
+   │  via EAS Build + EAS Update     │    │                      │
+   └─────────────────┬───────────────┘    └──────────┬───────────┘
+                     │                                │
+                     │   authenticated requests       │
+                     ▼                                ▼
+        ┌──────────────────────────────────────────────────┐
+        │             SUPABASE (cloud, free plan)          │
+        │  ┌─────────────────────────────────────────────┐ │
+        │  │  Postgres tables                            │ │
+        │  │    users, queries, customers_master,        │ │
+        │  │    products_master, salesperson_stats,      │ │
+        │  │    settings, notifications, tasks,          │ │
+        │  │    godowns, role_responsibilities           │ │
+        │  │                                             │ │
+        │  │  Row-Level Security: role-based at DB level │ │
+        │  │                                             │ │
+        │  │  RPC functions (SECURITY DEFINER):          │ │
+        │  │    claim_query, mark_won, add_invoice_entry,│ │
+        │  │    mark_packed, mark_dispatched,            │ │
+        │  │    pickup_follow_up, create_task,           │ │
+        │  │    toggle_task, assign_user_godown, …       │ │
+        │  │                                             │ │
+        │  │  Realtime: streams row changes to clients   │ │
+        │  └─────────────────────────────────────────────┘ │
+        └──────────────────────────────────────────────────┘
+                  ▲                              ▲
+                  │ writes verified status       │ writes customers +
+                  │ on each invoice              │ products master
+                  │                              │
+        ┌─────────┴─────────────┐    ┌───────────┴────────────┐
+        │   tally-bridge.js     │    │      tally-sync.js     │
+        │ (realtime listener +  │    │  (node-cron, every 5   │
+        │  initial sweep)       │    │   minutes)             │
+        └─────────┬─────────────┘    └───────────┬────────────┘
+                  │                              │
+                  │  XML over HTTP               │
+                  ▼                              ▼
+        ┌────────────────────────────────────────────────────┐
+        │  CLOUD WINDOWS SERVER (accessed via Remote Desktop)│
+        │  ┌──────────────────────────────────────────────┐  │
+        │  │  Tally Prime — always open, company loaded,  │  │
+        │  │  HTTP port 9003 listening                    │  │
+        │  └──────────────────────────────────────────────┘  │
+        │  PM2 keeps both scripts alive and auto-restarts    │
+        │  them on crash / Windows reboot.                   │
+        └────────────────────────────────────────────────────┘
+```
+
+Three things must always run on the Windows box: **Tally Prime** with the company loaded, **`tally-bridge.js`** (invoice verifier), and **`tally-sync.js`** (master-data sync). Without these, the app still works for create/claim/mark-booked, but invoice verification stops and new Tally customers/products don't sync.
+
+---
+
+## 5. State workflow
 
 ```
 open_query
     │ claim_query()
     ▼
-claimed_by_sales ──snooze_query()──► snoozed ──unsnooze_query()──► claimed_by_sales
-    │                                    │ (auto-unsnooze when follow_up_date hits)
-    │ mark_lost_cancelled()              │ mark_lost_cancelled()
-    ▼                                    ▼
-lost_cancelled                       lost_cancelled
+claimed_by_sales ──snooze_query()──► snoozed
+    │              ◄──unsnooze_query()  (auto-unsnooze on follow_up_date)
     │
-mark_won(cartoons, lots, follow_up_note?)
+    │ mark_lost_cancelled()
+    ▼
+lost_cancelled
+
+claimed_by_sales ──mark_won(cartons, lots, follow_up_note?, follow_up_date?)──►
     ▼
 won_pending_accounts ──add_invoice_entry()──► pending_verification
-   ▲                  (one or more entries; each verified independently)
+   ▲                  (one or more entries, each verified independently)
+   │                  (3-try lock per entry; admin can reset)
    │
-   │   (Tally bridge auto-checks every pending entry)
+   │ accounts_update_quantity() — edit cartons/lots inline
+   │ flag_back_to_sales() — bounce back with a note
    │
-   │ accounts can also accounts_update_quantity() to edit cartoons/lots
-   │
-   │ All entries verified AND sum(entries.cartoons+lots) ≥ query.cartoons+lots:
+   │ All entries verified AND sum(entries.cartons+lots) ≥ query.cartons+lots:
    ▼
-verified_pending_dispatch  (is_packed = false)
+verified_pending_dispatch  (is_packed = false → Packing's queue)
     │ mark_packed() / undo_packed() within 3 minutes
     ▼
-verified_pending_dispatch  (is_packed = true → "ready to ship")
+verified_pending_dispatch  (is_packed = true → Dispatch's queue)
     │ mark_dispatched() / undo_dispatched() within 3 minutes
     ▼
-partially_dispatched  ──or──►  completed
+completed
 
-verification_failed  (per-entry attempt fails — 3-try lock per entry)
-    └─flag_back_to_sales()──► won_pending_accounts  (admin)
-    └─cancel_verification_failed()──► lost_cancelled
+verification_failed  (3 failed attempts on a single entry)
+    └─flag_back_to_sales() → won_pending_accounts
+    └─cancel_verification_failed() → lost_cancelled
+
+Any query with an unresolved follow-up
+    └─pickup_follow_up() → claimed_by_sales (re-opens the 3 actions)
 ```
 
-Key transition functions: `claim_query`, `mark_won`, `snooze_query`, `mark_lost_cancelled`, `add_invoice_entry`, `accounts_update_quantity`, `mark_packed`, `undo_packed`, `mark_dispatched`, `undo_dispatched`, `resolve_follow_up`, `create_task`, `toggle_task`, `admin_reset_invoice_attempts`, `flag_back_to_sales`. Each:
+Every transition goes through a `SECURITY DEFINER` Postgres function that takes a row lock, validates the actor's role, validates the transition, and bumps `last_activity_at`. The state machine can't be bypassed from a client.
 
-1. Locks the row (`SELECT ... FOR UPDATE`).
-2. Verifies the actor is allowed to make this transition (claimer-only checks, role checks).
-3. Confirms `is_valid_transition(current, target)` returns true (where applicable).
-4. Updates the row + `salesperson_stats` counters (where applicable), returns `{success, message}` JSON.
-5. Bumps `last_activity_at` to `NOW()` — this is what the 15-day visibility cutoff watches.
-
-A malicious client can't skip steps because the only way to change state is via these functions.
-
-**Packing is a flag, not a status.** A query stays at `verified_pending_dispatch` while it moves through packing → dispatch; the `is_packed` flag advances the visual pipeline indicator between "Verified" and "Shipped".
+**Packing is a flag, not a status.** The query stays at `verified_pending_dispatch` while `is_packed` flips false → true.
 
 ---
 
-## Segments A–J — what was added on top of the Firebase original
+## 6. Database schema
 
-The system was extended from the original Firebase build through ten focused segments. They're individually small but interdependent (e.g. multi-invoice verification assumes the cartoons/lots model). For day-to-day operation you don't need to know which segment a feature came from — they're documented here for future archaeology.
+Tables (snake_case in DB, camelCase before reaching screens):
 
-| Seg | What changed | Lives in |
-|---|---|---|
-| **A** | Notification bell multi-route navigation fallback; admin can claim queries; cartoons/lots terminology foundation | `NotificationBell.js`, migration 010 |
-| **B** | New Query rewritten: Online/Offline origin pills, mandatory Notes, optional Products at bottom, no price/revenue UI | `NewQueryScreen.js`, `ProductSelector.js`, migration 011 |
-| **C** | Cartoons + lots as two separate quantities; follow-up note + origin (booked/snoozed); action sheets ask for required fields | migration 012, `QueryDetailScreen.js` |
-| **D** | Follow-Ups cross-portal tab — every unresolved follow-up regardless of state; resolved separately | `FollowUpsScreen.js`, `queryService.subscribeToFollowUps` |
-| **E** | Multi-invoice verification: each entry has its own attempt counter, party-name & duplicate checks, status; accounts can edit cartoons/lots inline | migration 013, `AccountsDashboardScreen.js`, `tally-bridge.js` (multi-entry processing — see Tally section below) |
-| **F** | Packing role + portal between Accounts and Dispatch; `is_packed` boolean (not a new status) | migration 014, `PackingDashboardScreen.js` |
-| **G** | Dispatch + Packing toggle UX with 3-minute undo window then lock | `mark_packed`/`undo_packed`/`mark_dispatched`/`undo_dispatched` RPCs |
-| **H** | 15-day visibility cutoff via `last_activity_at` — applied to every list except Follow-Ups | `queryService.visibilityCutoffISO()` |
-| **I** | 2-way task assignment (admin ↔ all roles) with notification on assign | migration 015, `TasksScreen.js`, `tasksService.js` |
-| **J** | Stats recompute on-the-fly from `queries.cartoons` + `queries.lots`; Week/Month/Year/All-Time tabs everywhere | `statsService.js`, `LeaderboardScreen.js`, `MyStatsScreen.js` |
+| Table | Purpose |
+|---|---|
+| `users` | One per human. `role` enum: `owner / salesperson / accounts / packing / dispatch` (legacy `operations` retained from a prior merge). `godown_id` optional. |
+| `godowns` | Warehouses. Name + active flag. Owner-only writes via RLS. |
+| `role_responsibilities` | Per-role reference docs. Each row has `role`, `title`, and a `steps` JSONB array. Owner writes; everyone reads. |
+| `customers_master` | Mirror of Tally Sundry Debtors, keyed by GUID. Category (A/B/C/D), price level, tally_alter_id, last_synced. |
+| `products_master` | Mirror of Tally Stock Items. `price` + `price_tiers` JSONB. |
+| `queries` | Core table. Cartons, lots, status, items, claim/snooze/won/dispatch fields, `invoice_entries` JSONB, `is_packed`, follow-up fields (note/date/origin/resolved), `last_activity_at`, **`godown_id`** (added in 019). |
+| `tasks` | Person-to-person tasks. `due_date`, `recurrence` JSONB, `next_due_date`, `last_completed_at`, `notify_settings`. |
+| `notifications` | In-app bell. Triggered by DB triggers on key state changes. |
+| `salesperson_stats` | Cached counters (legacy `total_sets_sold` kept for migrated rows; live UI recomputes cartons + lots from `queries`). |
+| `settings` | Single row (`id = 'app'`) for SLA thresholds + gone-quiet days. |
 
-**Critical Tally bridge change (Segment E):** `tally/tally-bridge.js` was rewritten to process each entry in `queries.invoice_entries` independently and roll up to the query's overall state at the end. Each entry has its own 3-try counter; the query only moves to `verified_pending_dispatch` once **every** entry verifies AND the sum of entries' cartoons + lots covers the query's total. **`tally/tally-sync.js` was not touched.**
+### Migrations (run sequentially in Supabase SQL Editor)
 
-**Hot-fix:** migration 016 renames `mark_won`'s `follow_up_note` parameter to `p_follow_up_note` — the original name collided with the `queries.follow_up_note` column and produced the error *"column reference 'follow_up_note' is ambiguous"*.
+```
+001..016                                  setup, RLS, RPCs, invoice flow, packing
+017_pre_operations_enum.sql               (RUN FIRST — one-line enum add)
+017_operations_role_and_godowns.sql       (then) — godowns table + 'operations' enum
+018_responsibilities_followup_tasks.sql   — split ops→packing, responsibilities,
+                                            follow-up date, tasks (due+recurrence)
+019_query_godown.sql                      — queries.godown_id column
+```
+
+`019` introduces no new enum values, so it's safe to paste-and-run as one batch.
+
+### Indexes worth knowing
+
+- `queries.status` and `queries.last_activity_at` — drives Feed + time-window filters.
+- `queries.tally_invoice_number` — partial **unique** index over verified/partial/completed (defense-in-depth duplicate-invoice block).
+- `queries.godown_id`, `users.godown_id` — godown filtering.
+- `tasks(to_user_id, next_due_date)` — recurring task scheduling.
 
 ---
 
-## 7. Caching & delta-sync (how the app stays fast)
+## 7. Realtime updates
 
-The Feed and the New Query dropdown can't wait 3 seconds to load the customer / product list. So:
+Every screen that displays live data uses a Supabase Realtime channel + an `AppState` re-fetch on foreground. Together they cover all of: row inserts, updates, deletes, and the offline → foreground gap.
 
-**Customer + product master data:**
-- On first launch, the app pulls everything from `customers_master` and `products_master` and stashes it in AsyncStorage (mobile) / localStorage (web).
-- On every subsequent launch, it reads the cache instantly (under 100 ms even on a slow connection).
-- Then, in the background, it fetches only rows where `last_synced > local_watermark`. Typically a handful of rows.
-- A trigger on the DB bumps `last_synced` to `NOW()` whenever a row is upserted (which Tally-sync does every 5 minutes).
-- Every 7 days, the app forces a full resync as a self-heal.
+| Surface | What's live |
+|---|---|
+| Feed / Owner Dashboard | 50-most-recent query updates |
+| Accounts dashboard | `where status in (won_pending_accounts, pending_verification, …)` |
+| Packing / Dispatch dashboards | `where status in (verified_pending_dispatch, completed)` + each team sees the other's queue read-only |
+| Follow-Ups | unresolved follow-ups sorted by upcoming date |
+| Leaderboard, My Stats | recompute on any `queries` change (godown-agnostic) |
+| Admin (users, godowns, settings, responsibilities) | live across owner sessions |
+| Tasks | inbox + sent live; local notifications rescheduled on every change |
+| Notifications bell | new notifications stream to the user |
 
-**Queries (the Feed):**
-- Subscribes via Supabase Realtime to the 50 most-recent queries. New inserts / updates flow in within ~1 second.
-- Full Feed is not cached — it's small (capped at 50) and changes constantly.
+The client layer also adds:
+- **Local refresh bus** — every mutating action fans out to all subscribers immediately on the calling device (no waiting for the Realtime roundtrip).
+- **In-flight + dirty refs** — prevents listener storms when many events arrive in a burst.
+- **Safe error path** — if the initial fetch fails, `callback([])` still fires so screens never sit on a spinner forever.
 
-**Stats / leaderboards:**
-- `salesperson_stats` table is essentially a materialized counter, written atomically by RPC functions on every mark-won / mark-lost.
-- All-time leaderboard is one read per user. Weekly/monthly leaderboards recompute from `queries` with a `last_activity_at` filter.
+Migrations 008 and 017 add the right tables to the `supabase_realtime` publication.
 
 ---
 
-## 8. Setup — one-time, end-to-end
+## 8. Caching strategy
 
-### 8.1. Create the Supabase project
+**Customer + product master data** — local AsyncStorage (mobile) / localStorage (web). First launch downloads everything; every subsequent open paints the cache instantly, then in the background does a delta sync (`where last_synced > localWatermark`) — typically a handful of rows. A 7-day full resync catches deletions.
 
-1. Go to https://app.supabase.com → **New project**.
-2. Name: `sales-tracker`, region: `Mumbai (ap-south-1)`, strong DB password.
-3. Wait ~2 minutes for provisioning.
+**Session** — Supabase persists the JWT + refresh token. Stale tokens are caught at boot and cleared silently (no noisy `AuthApiError`).
 
-### 8.2. Apply the SQL migrations in order
+**Per-device throttles** — `autoUnsnoozeExpired()` runs at most once every 5 min per device, so multiple opens don't fan out duplicate writes.
 
-In Supabase Dashboard → **SQL Editor → New query**, paste-and-run each of these in order:
+---
 
-1. `001_initial_schema.sql` (tables, enums, indexes)
-2. `002_rls_policies.sql` (Row-Level Security)
-3. `003_functions_and_triggers.sql` (atomic RPCs)
-4. `004_invoice_dedup.sql` (partial unique index)
-5. `005_admin_create_user.sql`
-6. `006_invoice_attempt_lock.sql`
-7. `007_fix_dispatch_cast.sql`
-8. `008_enable_realtime.sql`
-9. `009_notifications.sql`
-10. `010_admin_can_claim.sql`
-11. `011_query_origin.sql`
-12. `012_cartoons_lots_followups.sql`
-13. `013_multi_invoice.sql`
-14. `014_packing_flow.sql`
-15. `015_tasks.sql`
-16. `016_fix_markwon_ambiguity.sql`
+## 9. Tally integration
 
-Each should print "Success. No rows returned."
+### `tally-sync.js` (master data, every 5 min)
 
-### 8.3. Create the first user (owner)
+1. Hits Tally's HTTP-XML API at `localhost:9003` for ledgers (Sundry Debtors) and stock items.
+2. Parses with `fast-xml-parser`, normalises into `customers_master` / `products_master`.
+3. Persistent watermark in `sync-track-masters.json` — only Tally rows with a higher AlterID are pulled on the next tick.
+4. Upserts via the service-role key. The `set_last_synced` trigger stamps each row.
+5. Runs under `node-cron` at `*/5 * * * *`. Refuses to start a second cycle if one is still running.
 
-1. **Authentication → Users → Add user → Create new user.**
-2. Email: `owner@salestracker.app`, Password: anything ≥ 6 chars (save it), **check "Auto Confirm User"**.
-3. Copy the user's **UID**.
-4. SQL Editor → run:
-```sql
-INSERT INTO public.users (id, name, username, email, role, is_active)
-VALUES ('<uid-from-step-3>', 'Your Name', 'owner', 'owner@salestracker.app', 'owner', true);
+### `tally-bridge.js` (invoice verifier, always-on)
+
+1. On boot: one-time sweep of every `pending_verification` query.
+2. Realtime listener: picks up new ones the instant accounts submits them.
+3. For each pending invoice entry inside `queries.invoice_entries`:
+   - Posts a Day Book XML to Tally for the configured lookback / forward window.
+   - Searches for `<VOUCHERNUMBER>{entry.invoiceNo}</VOUCHERNUMBER>`.
+   - Cross-checks the voucher's party name against the query's customer.
+   - Rejects duplicates already verified on another query.
+   - Updates the entry's status and the parent query when all entries pass.
+4. **5-min cooldown** after a Tally auth failure (no hammering during misconfig).
+5. **3-try lock** per invoice entry; admin gets a "🔒 locked" notification.
+
+Both scripts use the **service-role key** (server-only). Never deploy these scripts to a client.
+
+---
+
+## 10. Tally setup on your cloud Windows server (RDP)
+
+Your setup: a cloud-hosted Windows machine you reach via Remote Desktop, with Tally Prime installed.
+
+### 10.1. Expose Tally's HTTP API
+
+In Tally Prime:
+1. **F1 → Settings → Connectivity → Client/Server configuration**.
+2. **TallyPrime acts as** → **Both**.
+3. **Port** → `9003` (anything 9000–9009 works; we use 9003 throughout).
+4. Save (Ctrl+A).
+
+Verify from a Command Prompt on the Windows machine:
+
+```cmd
+curl http://localhost:9003
 ```
 
-### 8.4. Configure the app
+You should see an `<ENVELOPE>...` XML response.
 
-```bash
-cd sales-tracker-supabase
-cp .env.example .env
-```
+### 10.2. Install Node.js
 
-Edit `.env` and paste your real values:
-```
-EXPO_PUBLIC_SUPABASE_URL=https://YOUR-PROJECT-REF.supabase.co
-EXPO_PUBLIC_SUPABASE_ANON_KEY=<the "anon public" key from Project Settings → API>
-```
+1. On the RDP'd Windows machine, open Edge / Chrome, go to **https://nodejs.org/en/download** → Windows Installer (.msi) — LTS (Node.js 20 is fine).
+2. Run the installer with defaults.
+3. Verify:
+   ```cmd
+   node --version
+   npm --version
+   ```
 
-**Tip:** Don't paste the anon key in TextEdit — macOS Smart Substitution turns hyphens into em-dashes and silently breaks the key. Use the terminal instead:
-```bash
-echo "EXPO_PUBLIC_SUPABASE_URL=https://YOUR-PROJECT-REF.supabase.co" > .env
-echo "EXPO_PUBLIC_SUPABASE_ANON_KEY=$(pbpaste)" >> .env
-```
-(after clicking the copy icon next to the anon key in the dashboard).
+### 10.3. Copy the `tally/` folder onto the server
 
-### 8.5. Run the app locally
+Either clone the repo (install Git first: `winget install --id Git.Git -e`) or zip-and-copy from your Mac. End result: `C:\sales-tracker\tally\` contains `tally-bridge.js`, `tally-sync.js`, `package.json`.
 
-```bash
-npm install
-npx expo start --web      # web at http://localhost:8081
-# or:
-npx expo start            # scan QR with Expo Go for mobile
-```
+### 10.4. Install dependencies
 
-Log in with `owner` and your password.
-
-### 8.6. Set up the Tally scripts (Windows machine where Tally runs)
-
-1. On Windows, install **Node.js 18+** from https://nodejs.org/en/download.
-2. Copy the `tally/` folder to `C:\sales-tracker\tally\`.
-3. Edit `C:\sales-tracker\tally\.env`:
-```
-SUPABASE_URL=https://YOUR-PROJECT-REF.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=<the service_role key from API → secret>
-TALLY_URL=http://localhost:9003
-TALLY_COMPANY=<your Tally company name, exact spelling>
-TALLY_USER=<your Tally username>
-TALLY_PASS=<your Tally password>
-TALLY_LOOKBACK_DAYS=14
-TALLY_FORWARD_DAYS=14
-```
-4. Install dependencies + start:
 ```cmd
 cd C:\sales-tracker\tally
 npm install
-node tally-bridge.js     :: in one window
-node tally-sync.js       :: in another window
 ```
 
-You should see startup banners showing the Tally company and lookback window. Within 5 minutes the first sync cycle prints "Customers synced. Products synced."
+### 10.5. Create `.env`
 
-### 8.7. Add your real team
+```cmd
+cd C:\sales-tracker\tally
+notepad .env
+```
 
-Owner → Admin tab → **+ Add User** for each:
-- Salespersons (role: Salesperson)
-- Accounts staff (role: Accounts)
-- Packing staff (role: Packing)
-- Dispatch staff (role: Dispatch)
+Paste:
 
-Hand them their credentials privately.
+```
+SUPABASE_URL=https://YOUR-PROJECT-REF.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOi...   # the service_role key, NOT the anon key
+TALLY_URL=http://localhost:9003
+TALLY_COMPANY=Your Tally Company Name Exactly As It Appears
+TALLY_USER=tallyuser
+TALLY_PASS=tallypassword
+TALLY_LOOKBACK_DAYS=14
+TALLY_FORWARD_DAYS=14
+```
 
-### 8.8. Disable public signups
+Get `SUPABASE_SERVICE_ROLE_KEY` from **Supabase dashboard → Project Settings → API → `service_role` (Reveal)**.
 
-Supabase Dashboard → **Authentication → Sign In / Providers → Email** → uncheck **"Enable email signups"** → Save.
+### 10.6. Smoke-test both scripts
 
-Now random people can't sign themselves up. Only the Admin panel can create users.
+Two Command Prompt windows:
+
+```cmd
+node tally-bridge.js
+```
+Expect `🎧 Listening for pending verifications…`.
+
+```cmd
+node tally-sync.js
+```
+Expect `🚀 Tally → Supabase Sync Service Started` and within 5 min `Customers synced. Products synced.`.
+
+When clean, close both windows (Ctrl+C). Move on to PM2.
 
 ---
 
-## 9. Deploying for your team (web + mobile)
+## 11. PM2 setup so the scripts survive reboots
 
-### Web deployment to Vercel (free)
+PM2 is a process supervisor that auto-restarts your scripts on crash and after Windows reboots.
 
-```bash
-cd sales-tracker-supabase
-npx expo export -p web   # creates dist/
-npm i -g vercel
-vercel login
-vercel --prod
-```
+### 11.1. Open Command Prompt **as Administrator**
 
-When prompted:
-- "Code directory?" → press Enter (uses current folder)
-- "Override settings?" → Y → Output directory: `dist`
+Press the Windows key → type `cmd` → **right-click** → **Run as administrator** → accept UAC.
 
-After deploy, in the Vercel dashboard for your project → **Settings → Environment Variables**, add:
-- `EXPO_PUBLIC_SUPABASE_URL` → your project URL
-- `EXPO_PUBLIC_SUPABASE_ANON_KEY` → the anon key
+### 11.2. Install PM2 + Windows startup helper
 
-Redeploy: `vercel --prod`. You'll get a URL like `https://sales-tracker-xyz.vercel.app`. Anyone with a valid login can use it from any browser, anywhere.
-
-### Mobile (Android APK)
-
-```bash
-npm i -g eas-cli
-eas login                                 # sign up free at expo.dev
-eas build:configure                       # one-time
-eas build -p android --profile preview
-```
-
-EAS builds the APK in the cloud (~10–15 minutes). You get a download link — share via WhatsApp / Drive. Team installs once. Future updates flow over-the-air:
-
-```bash
-eas update --branch preview --message "what changed"
-```
-
-iOS needs an Apple Developer account ($99/year) — skip unless someone uses iPhone.
-
----
-
-## 10. Day-to-day operations
-
-### Keeping the Windows machine alive
-
-The Tally machine must stay running 24/7 with Tally Prime open and the correct company loaded. When you connect via RDP and leave:
-
-| Action | Effect |
-|---|---|
-| **Close the RDP window** (X) or `Start → Disconnect` | Windows session stays alive. Tally + scripts keep running. ✅ Do this. |
-| **Sign Out / Log Off** | Windows kills the session. Tally closes. Scripts die. ❌ Avoid. |
-
-### How to tell if the bridge / sync are healthy
-
-Two black cmd windows on the Windows machine. Each shows a "heartbeat" — the bridge logs each verification, the sync logs every 5-minute cycle. If they're scrolling, you're good.
-
-The **Accounts Dashboard** in the app also shows warnings:
-- After 10 min in `pending_verification` → yellow "⏳ Awaiting verification…"
-- After 30 min → red "🔴 Bridge may be down. Escalate to Admin."
-
-These are your alarm bell. If you see them, RDP into Windows and check the cmd windows.
-
-### Monitoring checklist (weekly, 2 min)
-
-| Check | Where | Healthy if |
-|---|---|---|
-| Supabase DB size | Dashboard → Reports | < 500 MB (free tier limit) |
-| Supabase requests / day | Dashboard → Reports | < ~50k (you'll be well under) |
-| Bridge logs | Windows cmd window | scrolling, no repeated `🔐 Tally auth failed` |
-| Sync logs | Windows cmd window | every 5 min you see "Customers synced / Products synced" |
-
----
-
-## 11. Upcoming additions (PM2, auto-Tally launch, etc.)
-
-These are operational hardening steps. **The system works without them**, but they make it self-healing against reboots and crashes.
-
-### 11.1. PM2 (auto-restart the scripts)
-
-Today, the Tally scripts run in two manually-launched cmd windows. If they crash, or if Windows reboots, you have to RDP in and start them again manually.
-
-**PM2** is a small "babysitter" that:
-- Auto-restarts the scripts within 1 second if they crash
-- Re-launches them automatically every time Windows boots
-
-#### How to set up PM2 (one-time, ~5 min)
-
-Requires **admin rights** on the Windows machine. RDP in as admin (use Microsoft Remote Desktop on Mac with admin credentials — not TSplus, which doesn't expose admin shell).
-
-1. Open Command Prompt **as Administrator**: press Win key → type `cmd` → right-click → **Run as administrator** → Yes on the UAC dialog.
-
-2. Run these commands:
 ```cmd
 npm install -g pm2 pm2-windows-startup
 pm2-startup install
+```
+
+### 11.3. Start the scripts under PM2
+
+```cmd
 cd C:\sales-tracker\tally
 pm2 start tally-bridge.js --name tally-bridge
 pm2 start tally-sync.js --name tally-sync
 pm2 save
 ```
 
-3. Verify both online:
+### 11.4. Verify
+
 ```cmd
 pm2 list
 ```
-You should see a table with both as `online`.
 
-4. **Close the manually-launched cmd windows** (Ctrl+C, then X) — otherwise you'll have two copies running, which double-processes every invoice.
+Both should show `online`.
 
-5. **Test reboot survival**: restart Windows. After it comes back and Tally auto-opens, run `pm2 list` again. Both should still show online — PM2 brought them back automatically.
+### 11.5. Test reboot survival
 
-#### Useful PM2 commands
+Restart Windows. RDP back in. `pm2 list` — both should already be `online`.
+
+### 11.6. PM2 commands you'll use
 
 | Command | What it does |
 |---|---|
-| `pm2 list` | Show status |
-| `pm2 logs tally-bridge` | Live tail bridge logs (Ctrl+C to exit, script keeps running) |
+| `pm2 list` | Show status of all processes |
+| `pm2 logs tally-bridge` | Live-tail bridge logs (Ctrl+C exits, script keeps running) |
 | `pm2 logs tally-sync` | Same for sync |
-| `pm2 restart tally-bridge` | Force restart (after `.env` change) |
-| `pm2 stop tally-sync` | Pause |
-| `pm2 delete tally-bridge` | Remove from PM2 |
+| `pm2 restart tally-bridge` | Force restart after a `.env` change |
+| `pm2 stop tally-bridge` | Pause |
+| `pm2 delete tally-bridge` | Remove from PM2's list |
+| `pm2 save` | Persist current list (after add/remove) |
 
-### 11.2. Windows auto-login + Tally in Startup folder
+### 11.7. Keep the Windows session alive
 
-Even with PM2, if Windows reboots and no user is logged in, Tally doesn't auto-start (PM2 brings up the scripts, but they have no Tally to talk to).
+| Action | Effect |
+|---|---|
+| **Close the Remote Desktop window** (X button) | Session keeps running. ✅ |
+| **`Start → Sign out`** | Session is killed. Tally closes. ❌ Avoid. |
 
-Fix: configure Windows to auto-log-in to a specific user account and put a Tally shortcut in that user's Startup folder.
+If your cloud provider auto-signs-out idle sessions, set up **Windows auto-login** (`netplwiz`, uncheck "Users must enter a username and password") and drop a Tally Prime shortcut into `shell:startup`. Inside Tally: **F1 → Configure → Startup → Auto-load the company on launch**.
 
-1. On the Windows machine, press Win+R → type `netplwiz` → uncheck "Users must enter a username and password" → enter the user's password when prompted → OK.
-2. Open File Explorer → address bar → type `shell:startup` → Enter.
-3. Drag a shortcut to `Tally Prime` into that folder.
-4. Inside Tally: **F1 → Configure → Startup → Auto-load the production company on launch**.
+After any reboot: Windows auto-logs-in → Tally auto-launches → company loads → PM2 (Windows startup) starts both scripts → verifications resume in ~2 min.
 
-Now: Windows reboot → auto-login → Tally launches → company loads → PM2 (already on Windows service) starts → scripts come online → everything's back in ~2 minutes with zero human intervention.
+---
 
-### 11.3. Nightly Tally restart (defensive)
+## 12. Day-to-day operations
 
-Tally can develop memory issues if open for weeks. Schedule a Task Scheduler job to:
-- Every night at 2 AM: kill Tally, wait 30 sec, relaunch.
+### Onboarding a new user
 
-The scripts retry on their next 5-minute cycle, so the brief interruption is invisible to users (and at 2 AM nobody's using the app anyway).
+Owner → Admin → **+ Add User** → name, username, password, role, optional godown. Submit. They can log in immediately.
 
-### 11.4. India Standard Time on the cloud server
+### Reassigning a user's role or godown
 
-If your Windows machine's clock isn't on IST, the `TALLY_LOOKBACK_DAYS` window can drift by a day. Fix once:
+Owner → Admin → tap user card → **Change Role** or **Assign Godown**.
 
-In Command Prompt (as admin):
-```cmd
-tzutil /s "India Standard Time"
+### Adding a godown
+
+Owner → Admin → **Manage Godowns** → **+ Add Godown** → name it. Existing users can be tagged via the user action menu.
+
+### Defining role responsibilities
+
+Owner → Admin → **Role Responsibilities** → pick the role pill → **+ Add**. Type a title and add steps one by one. Save. Every user of that role sees it under the 📋 button in their dashboard header.
+
+### Updating SLA thresholds
+
+Owner → Admin → **Settings & SLA Thresholds**. Saves live on every dashboard.
+
+### Recovering from a Tally auth failure
+
+1. Accounts sees "🔐 Tally auth failed N× — escalate to admin".
+2. Admin RDPs into the Windows box, checks `.env` for the right `TALLY_USER` / `TALLY_PASS`.
+3. `pm2 restart tally-bridge`.
+4. After the 5-min cooldown, the bridge retries stuck queries.
+
+### Unlocking a query after 3 failed invoice attempts
+
+Owner Dashboard shows locked queries with an **Unlock** button. Tap → entry's attempt counter resets → accounts can re-enter.
+
+### Healthy weekly check (2 min)
+
+| Where | What | Healthy if |
+|---|---|---|
+| Windows RDP | `pm2 list` | Both processes `online`, uptime > 1 day |
+| Supabase dashboard | Reports → Usage | Well under free-plan ceilings (see §14) |
+| Accounts dashboard | "Tally auth failed" banner | Not present |
+
+---
+
+## 13. Deploying changes (web + mobile OTA)
+
+### Mobile — over-the-air JS update (95% of changes)
+
+Any change inside `src/` or any Supabase migration — push as an OTA:
+
+```bash
+cd sales-tracker-supabase
+eas update --branch preview --message "describe what changed"
 ```
-Persistent across reboots. Five-second task.
+
+~30 seconds. Phones pick it up on the next **cold-start** (force-close the app fully — swipe it away from recent apps — then reopen).
+
+**Important caveat:** OTA only works if the installed APK was built **with the `expo-updates` plugin already active**. If you ever see "I pushed an OTA but the app didn't update" — even after force-closing — the cause is almost always that the APK on the device predates `expo-updates`. One-time fix: rebuild the APK once.
+
+### Mobile — new APK (rare)
+
+Needed only when:
+- `app.json` changes (icon, name, permissions, splash)
+- A native dependency is added (e.g. `expo-camera`)
+- Expo SDK is upgraded
+- You haven't yet built an APK with `expo-updates` wired up
+
+```bash
+eas build -p android --profile preview
+```
+
+~10–15 min in the cloud. Share the APK URL with the team — they install once. After that, future updates flow OTA.
+
+### Verify OTA before pushing
+
+Confirm the cloud side is healthy before each push:
+
+```bash
+eas update:list --branch preview --limit 5
+```
+
+You should see your recent updates with timestamps + bundle sizes. If `eas update` reports success and this list shows the entry, the cloud side is fine — any phone "not seeing the change" is an APK-side problem (most often: APK predates OTA, or app wasn't force-closed and reopened).
+
+### Web — Vercel
+
+```bash
+npx expo export -p web      # builds to dist/
+vercel --prod               # deploys dist/ to Vercel
+```
+
+~1 minute. Anyone on the Vercel URL gets the new version on their next reload.
+
+### Supabase migrations
+
+When the SQL schema changes:
+
+1. Supabase Dashboard → **SQL Editor → New query** → paste the migration → Run.
+2. After it succeeds, push the JS via `eas update` and `vercel --prod`.
+
+**Order for migrations that add an enum value** (like `017_pre_operations_enum.sql` → `017_operations_role_and_godowns.sql`): the `ALTER TYPE ... ADD VALUE` line must be in its own run, because Postgres requires a separate transaction before any statement can reference the new value.
 
 ---
 
-## 12. Known limitations & edge cases
+## 14. Supabase free-tier usage — where you stand and when to upgrade
 
-### Recently fixed ✅
+You're on the **Free Plan** (`$0 / month`). Here's exactly where you sit (from the usage screen you shared):
 
-| Limitation | Status |
-|---|---|
-| 3-day Tally lookback (backdated / future-dated invoices failed) | ✅ Now `TALLY_LOOKBACK_DAYS` / `TALLY_FORWARD_DAYS`, default 14/14 |
-| Salesperson could enter wrong invoice number; bridge wouldn't catch | ✅ Bridge now cross-checks party name on the Tally voucher vs query's customer |
-| Same invoice could verify two different queries | ✅ Bridge rejects duplicates with a clear message; partial unique index in Postgres enforces it at DB level too |
-| Auth-failure looped forever | ✅ 5-min cooldown after Tally rejects login (carried over from the Firebase original) |
+| Resource | Free quota | Your current use | Headroom |
+|---|---|---|---|
+| Database size | 500 MB | **30 MB** | ~16,000× — years of runway |
+| Egress / month | 5 GB | **7 MB** | ~700× current |
+| Monthly Active Users | 50,000 | **12 MAU** | ~4,000× current |
+| Realtime concurrent peak | 200 | **8** | ~25× current |
+| Realtime messages / month | 2 million | **213** | astronomical |
+| Edge function invocations | 500K / month | **0** | unused |
+| Storage | 1 GB | **0 GB** | unused |
 
-### Still present (deferred by design or low priority)
+**Bottom line: you're using under 0.1% of every meter.** If you 100× the team and 100× query volume tomorrow, you'd still sit comfortably on Free.
 
-| Limitation | Workaround |
-|---|---|
-| Tally deletions don't propagate. Deleted customer in Tally stays in Supabase. | Acceptable per your call. Old customers just clutter the dropdown. Manually delete from Supabase if needed. |
-| No "undo mark-won" button (24-hour window) | Salesperson asks accounts to flag back to sales. |
-| No "queries open more than X days" alert on Owner Dashboard | Owner scrolls the Feed periodically. |
-| Verified-invoice cross-check only matches party name, not amount or item list | Party name is the highest-value signal. Amount checks are tricky because of GST and partial dispatch. Owner spot-checks high-value sales. |
-| Restoring Tally from a backup confuses the sync (AlterID watermark too high) | After restore: delete `C:\sales-tracker\tally\sync-track-masters.json` and restart sync. Documented in `tally/README.md`. |
+### When you'd actually need Pro ($25/mo)
+
+In rough order of likelihood for your business:
+
+1. **You want daily backups stored for 14 days.** This is the single most-real reason for a business your size — Free has only point-in-time recovery on the running Postgres instance; Pro adds 14-day backups. If you store anything you can't afford to lose, that's worth $25/mo.
+2. **DB grows past 500 MB.** At ~5 KB / query row, that's ~100,000 query rows. At your current pace you have 5+ years of runway.
+3. **Egress exceeds 5 GB / month.** Would need ~1,000× current activity.
+4. **MAU exceeds 50,000.** Effectively impossible for a single-business team.
+5. **Free-plan project pauses after 7 days of zero activity.** With daily usage you'll never hit this.
+
+**My recommendation:** Stay on Free indefinitely. The one trigger worth upgrading early for is the daily-backup peace of mind — pay $25/mo once you start trusting the system enough to depend on it for audit history. Until then, every meter has multiple orders of magnitude of room.
+
+How to keep an eye: Supabase Dashboard → **Organization → Usage** is the page you screenshotted. Check it monthly until you have a feel for the curve.
 
 ---
 
-## 13. Troubleshooting
+## 15. Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Login fails with "Invalid username or password" but credentials look right | The anon key in `.env` has an em-dash from macOS Smart Substitution. Open the browser console — you'll see `non ISO-8859-1 code point` errors. | Re-paste the anon key via terminal: `echo "EXPO_PUBLIC_SUPABASE_ANON_KEY=$(pbpaste)" >> .env`, then restart Expo with `--clear`. |
-| App shows "Cannot resolve entry file" | `package.json` says `main: index.js` but no `index.js` exists | Create `index.js` with `import { registerRootComponent } from 'expo'; import App from './App'; registerRootComponent(App);` |
-| User can log in but immediately gets logged out | No matching row in `public.users` for that auth user. The auth account exists but isn't whitelisted. | Insert a row in `public.users` with the same UID (see step 8.3). |
-| Invoice stays stuck on `pending_verification` for 30+ min | Bridge is down, or Tally is closed, or wrong company is loaded | RDP into Windows. Check both cmd windows are running (or `pm2 list`). Confirm Tally is open with the right company. |
-| Bridge logs `🔐 Tally auth failed` repeatedly | `TALLY_USER` / `TALLY_PASS` wrong | Fix `.env`, restart bridge. The 5-min cooldown automatically pauses retries to avoid hammering Tally. |
-| Bridge logs `Authentication Failed` but credentials look right | Tally's HTTP API doesn't expect those credentials there. Some Tally setups require the **TallyPrime → F1 → Users** password, not the company-open password. | Check the actual Tally user / password matrix. |
-| Sync says "All up to date" but Supabase is empty | The `sync-track-masters.json` watermark is too high (often after a Tally backup restore) | Delete `sync-track-masters.json` → `pm2 restart tally-sync` → it'll re-pull everything. |
-| Customers verify but invoice is for "the wrong customer" | New cross-check is doing its job — the salesperson typed the wrong invoice. | Re-enter the correct invoice in the Accounts Dashboard. |
-| Vercel deploy shows blank page | Env vars not set, or build output directory misconfigured | In Vercel project → Settings → Environment Variables: set both `EXPO_PUBLIC_SUPABASE_*`. Redeploy. |
+| OTA pushed but phone shows old UI | APK predates `expo-updates` plugin OR app wasn't force-closed | Verify with `eas update:list`. Force-close (swipe away from recent apps) and reopen. If still old: rebuild the APK once with `eas build -p android --profile preview`. |
+| Login spinner forever | Network is too slow or stuck refresh token | The app now hard-times-out at 20s and shows a "network too slow" error. Stale tokens are cleared on next launch. |
+| `AuthApiError: Invalid Refresh Token` in console | Benign — stored session is stale | LogBox is configured to ignore it in dev. App auto-signs-out and lands on login screen. |
+| User can log in but immediately gets logged out | No row in `public.users` for that UID | Owner → Admin → Add User with the same username, OR insert a `public.users` row matching the auth UID. |
+| Owner switched godown but Feed still shows everything | The chip is on "All Godowns" | Tap the chip in the top bar → pick a specific godown. The choice persists across screen navigation and reopens. |
+| Salesperson sees only some queries | That's by design — they only see queries from their godown + ungodowned queries | Owner can re-tag a query's godown via SQL update, or tag new queries appropriately at creation. |
+| Invoice stuck on `pending_verification` 30+ min | Bridge is down, Tally is closed, or wrong company is loaded | RDP into Windows. `pm2 list` — both `online`? Tally open with the right company? |
+| `🔐 Tally auth failed` banner | Wrong `TALLY_USER` / `TALLY_PASS` in `.env` | Fix `.env`, then `pm2 restart tally-bridge`. 5-min cooldown prevents hammering. |
+| Sync says "All up to date" but Supabase customer list is empty | `sync-track-masters.json` watermark is too high (e.g. after a Tally backup restore) | Delete `C:\sales-tracker\tally\sync-track-masters.json` → `pm2 restart tally-sync`. |
+| Vercel deploy → blank page | Env vars not set in Vercel | Vercel project → Settings → Environment Variables → set `EXPO_PUBLIC_SUPABASE_URL` and `EXPO_PUBLIC_SUPABASE_ANON_KEY` → redeploy. |
+| `unsafe use of new value 'X' of enum` on migration | `ALTER TYPE ... ADD VALUE` + a statement using it must be in separate transactions | Split the migration (017 pair is the example). |
+| Customer list slow on first open | Fresh device — pulling ~2,500 customers + ~5,000 products | Expected. Progressive batches make the dropdown searchable within ~1 sec; subsequent opens are near-instant. |
+| Tasks not firing notifications at the right time | Local notifications require permission + device on | Make sure the user granted notification permission. Local notifications fire even with the app closed but require the device to be on — Android may delay by minutes on Doze. |
 
 ---
 
-## 14. Files to know
+## 16. File layout
 
-If something's broken, these are the files to check first:
-
-| What's broken | File to look at |
-|---|---|
-| Login | `src/contexts/AuthContext.js` |
-| Feed not loading | `src/services/queryService.js` (subscribeToQueries) |
-| Customer dropdown empty | `src/services/masterDataService.js` |
-| State transition not working | `supabase/migrations/003_functions_and_triggers.sql` + the segment-specific migrations (012–016) |
-| RLS rejecting a write | `supabase/migrations/002_rls_policies.sql` (+ 014 for packing, 015 for tasks) |
-| Multi-invoice entry / 3-try lock | `supabase/migrations/013_multi_invoice.sql` + `AccountsDashboardScreen.js` |
-| Packed/Dispatched toggle | `supabase/migrations/014_packing_flow.sql` + `PackingDashboardScreen.js` / `DispatchDashboardScreen.js` |
-| Follow-ups not appearing | `FollowUpsScreen.js` + `queryService.subscribeToFollowUps` |
-| Tasks not delivered | `supabase/migrations/015_tasks.sql` + `tasksService.js` |
-| Stats off / period tabs | `src/services/statsService.js` + `src/utils/timeUtils.js` |
-| Tally invoice verification | `tally/tally-bridge.js` (multi-entry rewrite per Segment E) |
-| Tally master-data sync | `tally/tally-sync.js` (unchanged) |
-| Excel export | `src/services/exportService.js` + `exportShare.{native,web}.js` |
+```
+sales-tracker-supabase/
+├── README.md                     ← this file
+├── SUPABASE_SETUP.md             ← initial Supabase project + migrations setup
+├── App.js                        ← root component, providers, LogBox config
+├── app.json / eas.json           ← Expo + EAS config (channel: preview)
+├── package.json
+├── .env                          ← Supabase URL + anon key (gitignored)
+│
+├── supabase/migrations/          ← run sequentially in Supabase SQL Editor
+│   ├── 001_initial_schema.sql
+│   ├── 002_rls_policies.sql
+│   ├── 003_functions_and_triggers.sql
+│   ├── 004_invoice_dedup.sql
+│   ├── 005_admin_create_user.sql
+│   ├── 006_invoice_attempt_lock.sql
+│   ├── 007_fix_dispatch_cast.sql
+│   ├── 008_enable_realtime.sql
+│   ├── 009_notifications.sql
+│   ├── 010_admin_can_claim.sql
+│   ├── 011_query_origin.sql
+│   ├── 012_cartoons_lots_followups.sql
+│   ├── 013_multi_invoice.sql
+│   ├── 014_packing_flow.sql
+│   ├── 015_tasks.sql
+│   ├── 016_fix_markwon_ambiguity.sql
+│   ├── 017_pre_operations_enum.sql       ← RUN FIRST (one-line enum add)
+│   ├── 017_operations_role_and_godowns.sql ← then this — godowns + (legacy) operations enum
+│   ├── 018_responsibilities_followup_tasks.sql  ← split ops→packing, responsibilities, follow-up date, recurring tasks
+│   └── 019_query_godown.sql              ← queries.godown_id column for per-query scoping
+│
+├── src/
+│   ├── lib/supabase.js              ← Supabase client (15s fetch timeout, native + web storage)
+│   ├── contexts/
+│   │   ├── AuthContext.js           ← single-fetch login, refresh-token recovery
+│   │   └── GodownFilterContext.js   ← global godown filter (owner chip + role-based)
+│   ├── navigation/AppNavigator.js   ← top bar + sidebar (web), bottom tabs (native)
+│   ├── components/
+│   │   ├── GodownFilterChip.js      ← top-bar / header chip (owner only)
+│   │   ├── NotificationBell.js, BottomSheet.js, StatusBadge.js, FilterTabs.js, …
+│   │   └── PlatformDatePicker.{native,web}.js
+│   ├── screens/
+│   │   ├── LoginScreen.js           ← 20s hard timeout
+│   │   ├── FeedScreen.js
+│   │   ├── NewQueryScreen.js        ← godown picker (defaults to user's godown)
+│   │   ├── QueryDetailScreen.js     ← Mark Booked / Snooze / Lost sheets, follow-up date
+│   │   ├── AccountsDashboardScreen.js
+│   │   ├── PackingDashboardScreen.js  ← To Pack (editable) + In Dispatch (view-only)
+│   │   ├── DispatchDashboardScreen.js ← To Dispatch (editable) + In Packing (view-only) + Completed
+│   │   ├── FollowUpsScreen.js       ← sorted by upcoming date; "Pick Up" → claimed_by_sales
+│   │   ├── TasksScreen.js           ← one-time / days / weekdays / day-of-month + local notifications
+│   │   ├── OwnerDashboardScreen.js  ← chip-scoped stats + pipeline
+│   │   ├── AdminScreen.js           ← Users + Godowns + Responsibilities + Settings + Export
+│   │   ├── ResponsibilitiesScreen.js ← read-only viewer per role
+│   │   ├── LeaderboardScreen.js     ← cartons + lots; NOT godown-scoped for non-owners
+│   │   └── MyStatsScreen.js         ← realtime; personal stats
+│   ├── services/
+│   │   ├── queryService.js          ← realtime + state-machine RPCs + safe error paths
+│   │   ├── authService.js           ← createUser (godown-aware), subscribeToUsers
+│   │   ├── godownService.js         ← CRUD + assign + realtime
+│   │   ├── responsibilitiesService.js
+│   │   ├── settingsService.js
+│   │   ├── statsService.js          ← on-the-fly from queries
+│   │   ├── tasksService.js          ← due_date, recurrence, describeRecurrence
+│   │   ├── taskNotifications.js     ← local notifications scheduler
+│   │   ├── notificationService.js   ← Expo Push (mobile only)
+│   │   ├── notificationsService.js  ← in-app bell
+│   │   ├── masterDataService.js     ← customers + products cache + delta sync
+│   │   └── exportService.js + exportShare.{native,web}.js
+│   └── utils/
+│       ├── constants.js             ← ROLES, STATUS, COLORS, TIME_PERIODS
+│       ├── formatUtils.js           ← formatPercentage only
+│       └── timeUtils.js
+│
+└── tally/                              ← lives on the Windows server
+    ├── tally-bridge.js                 ← realtime invoice verifier
+    ├── tally-sync.js                   ← 5-min master-data sync
+    ├── tally-*-debug.js                ← Tally diagnostic helpers
+    ├── package.json
+    ├── .env                            ← Supabase service-role + Tally creds
+    └── README.md
+```
 
 ---
 
-## TL;DR — the 5 things to remember
+## TL;DR — five things to remember
 
-1. **3 things must always run** on the Windows machine: Tally Prime (with the right company), `tally-bridge.js`, `tally-sync.js`. The first is GUI, the next two are cmd / PM2.
-2. **The app works on web (Vercel URL) and mobile (Android APK from EAS Build)** — same codebase, no extra work.
-3. **Never click Sign Out on the Windows machine** — just close the RDP window. Sign Out kills everything.
-4. **Setting up PM2 + Windows auto-login** (section 11) makes the whole thing self-healing through crashes and reboots. Without it, you'll occasionally need to RDP in after a reboot.
-5. **Cost at your scale: ₹0/month**. Supabase Free, Vercel Free, EAS Free. The Windows machine is your only ongoing cost.
-
-When you forget how this works in 6 months, this README is here. Good luck.
+1. **3 things must always run on the cloud Windows server**: Tally Prime (with the right company), `tally-bridge.js`, `tally-sync.js`. PM2 handles the last two.
+2. **Close the RDP window, don't Sign Out.** Sign Out kills the session. Closing the window leaves it running.
+3. **OTA updates handle 95% of changes.** After the one-time APK rebuild (with `expo-updates` baked in), every future `eas update --branch preview --message "..."` reaches every installed APK in ~30 seconds. Phones need a full force-close + reopen to pick it up.
+4. **Godowns scope queries but NOT stats.** Non-owners only see their godown's queries; the Leaderboard shows everyone. Owner has the top-bar chip to switch view.
+5. **Free Supabase is more than enough.** Current usage is under 0.1% of every meter. The single Pro-tier feature worth upgrading early for is daily backups (and only when audit history matters).

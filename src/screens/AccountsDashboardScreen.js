@@ -5,6 +5,7 @@ import {
 } from 'react-native';
 import { COLORS, STATUS, SAFE_TOP, DEFAULT_SLA } from '../utils/constants';
 import { useAuth } from '../contexts/AuthContext';
+import { useGodownFilter } from '../contexts/GodownFilterContext';
 import {
   subscribeToQueriesByStatuses,
   addInvoiceEntry,
@@ -43,8 +44,9 @@ const ENTRY_BADGE = {
   failed: { bg: '#FEE2E2', fg: '#991B1B', label: '❌ Failed' },
 };
 
-export default function AccountsDashboardScreen() {
+export default function AccountsDashboardScreen({ navigation }) {
   const { logout, userName } = useAuth();
+  const { filterQueries } = useGodownFilter();
   const [allQueries, setAllQueries] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -78,22 +80,27 @@ export default function AccountsDashboardScreen() {
     return () => { unsubQ(); unsubS(); };
   }, []);
 
+  // Scope by the current user's godown (non-owner) or by the owner's chip.
+  // Every derived count + list reads from scopedQueries instead of the raw
+  // allQueries so this single filter governs the whole screen.
+  const scopedQueries = useMemo(() => filterQueries(allQueries), [allQueries, filterQueries]);
+
   const stats = useMemo(() => {
-    const pending = allQueries.filter(q => [STATUS.WON_PENDING_ACCOUNTS, STATUS.PENDING_VERIFICATION].includes(q.status)).length;
-    const failed = allQueries.filter(q => q.status === STATUS.VERIFICATION_FAILED).length;
-    const verified = allQueries.filter(q =>
+    const pending = scopedQueries.filter(q => [STATUS.WON_PENDING_ACCOUNTS, STATUS.PENDING_VERIFICATION].includes(q.status)).length;
+    const failed = scopedQueries.filter(q => q.status === STATUS.VERIFICATION_FAILED).length;
+    const verified = scopedQueries.filter(q =>
       [STATUS.VERIFIED_PENDING_DISPATCH, STATUS.PARTIALLY_DISPATCHED, STATUS.COMPLETED].includes(q.status)
     ).length;
-    return { pending, failed, verified, total: allQueries.length };
-  }, [allQueries]);
+    return { pending, failed, verified, total: scopedQueries.length };
+  }, [scopedQueries]);
 
   const filteredQueries = useMemo(() => {
-    let f = allQueries;
+    let f = scopedQueries;
     if (activeTab === 'pending') f = f.filter(q => [STATUS.WON_PENDING_ACCOUNTS, STATUS.PENDING_VERIFICATION].includes(q.status));
     else if (activeTab === 'verified') f = f.filter(q => [STATUS.VERIFIED_PENDING_DISPATCH, STATUS.PARTIALLY_DISPATCHED, STATUS.COMPLETED].includes(q.status));
     else if (activeTab === 'failed') f = f.filter(q => q.status === STATUS.VERIFICATION_FAILED);
     return [...f].sort((a, b) => (b.wonAt?.getTime() || b.createdAt?.getTime() || 0) - (a.wonAt?.getTime() || a.createdAt?.getTime() || 0));
-  }, [allQueries, activeTab]);
+  }, [scopedQueries, activeTab]);
 
   const tabsWithCounts = TABS.map(t => ({
     ...t,
@@ -325,6 +332,12 @@ export default function AccountsDashboardScreen() {
           <Text style={styles.headerTitle}>Accounts Dashboard</Text>
           <Text style={styles.headerSubtitle}>Hi, {userName || 'User'}</Text>
         </View>
+        <TouchableOpacity
+          style={[styles.logoutBtn, { marginRight: 6 }]}
+          onPress={() => navigation?.navigate?.('Responsibilities')}
+        >
+          <Text style={styles.logoutText}>📋 My Role</Text>
+        </TouchableOpacity>
         <NotificationBell style={{ marginRight: 8 }} />
         <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
           <Text style={styles.logoutText}>Logout</Text>

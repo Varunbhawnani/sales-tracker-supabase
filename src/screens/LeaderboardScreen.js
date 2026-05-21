@@ -1,9 +1,12 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { View, Text, FlatList, StyleSheet } from 'react-native';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { View, Text, FlatList, StyleSheet, AppState } from 'react-native';
 import { COLORS, TIME_PERIODS, SAFE_TOP } from '../utils/constants';
 import { useAuth } from '../contexts/AuthContext';
 import { getLeaderboardData } from '../services/statsService';
 import { exportLeaderboard } from '../services/exportService';
+import { subscribeToTable } from '../lib/supabase';
+import GodownFilterChip from '../components/GodownFilterChip';
+import { useGodownFilter } from '../contexts/GodownFilterContext';
 import FilterTabs from '../components/FilterTabs';
 import LeaderboardRow from '../components/LeaderboardRow';
 import EmptyState from '../components/EmptyState';
@@ -26,35 +29,62 @@ const PERIOD_LABELS = {
 
 export default function LeaderboardScreen() {
   const { userId } = useAuth();
+  const { filterByUserId } = useGodownFilter();
   const [data, setData] = useState([]);
   const [period, setPeriod] = useState(TIME_PERIODS.ALL_TIME);
   const [loading, setLoading] = useState(true);
 
-  const loadData = useCallback(async () => {
-    setLoading(true);
+  // When the owner picks a godown, only salespeople in that godown should
+  // appear on the leaderboard. Reranks live based on the filtered set so the
+  // podium positions reflect the godown's ranking.
+  const visibleData = filterByUserId(data).map((r, i) => ({ ...r, rank: i + 1 }));
+
+  const inFlightRef = useRef(false);
+  const dirtyRef = useRef(false);
+
+  const loadData = useCallback(async ({ silent = false } = {}) => {
+    if (inFlightRef.current) { dirtyRef.current = true; return; }
+    inFlightRef.current = true;
+    if (!silent) setLoading(true);
     try {
+      dirtyRef.current = false;
       const result = await getLeaderboardData(period);
       setData(result);
     } catch (error) {
       console.error('Error loading leaderboard:', error);
     } finally {
-      setLoading(false);
+      inFlightRef.current = false;
+      if (!silent) setLoading(false);
+      if (dirtyRef.current) loadData({ silent: true });
     }
   }, [period]);
 
   useEffect(() => { loadData(); }, [loadData]);
 
+  // Realtime refresh: leaderboard recomputes from queries, so any queries
+  // change (someone marks won, accounts edits cartoons, etc.) needs to
+  // propagate without the user having to re-open the screen. Throttle is
+  // built into loadData via the inFlight + dirty refs.
+  useEffect(() => {
+    const channel = subscribeToTable('queries', '*', () => { loadData({ silent: true }); });
+    const appStateSub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') loadData({ silent: true });
+    });
+    return () => { channel.unsubscribe(); appStateSub?.remove(); };
+  }, [loadData]);
+
   const handleExport = async () => {
-    await exportLeaderboard(data, PERIOD_LABELS[period]);
+    await exportLeaderboard(visibleData, PERIOD_LABELS[period]);
   };
 
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <View>
+        <View style={{ flex: 1 }}>
           <Text style={styles.headerTitle}>Leaderboard</Text>
           <Text style={styles.headerSubtitle}>Salesperson rankings</Text>
         </View>
+        <GodownFilterChip compact style={{ marginRight: 8 }} />
         <ExportButton onExport={handleExport} label="Excel" />
       </View>
 
@@ -64,22 +94,22 @@ export default function LeaderboardScreen() {
         onTabChange={setPeriod}
       />
 
-      {!loading && data.length >= 3 && (
+      {!loading && visibleData.length >= 3 && (
         <View style={styles.podium}>
           <View style={[styles.podiumItem, styles.podiumSecond]}>
             <Text style={styles.podiumMedal}>2</Text>
-            <Text style={styles.podiumName} numberOfLines={1}>{data[1]?.name}</Text>
-            <Text style={styles.podiumSets}>{(data[1]?.totalCartoons || 0)} c · {(data[1]?.totalLots || 0)} l</Text>
+            <Text style={styles.podiumName} numberOfLines={1}>{visibleData[1]?.name}</Text>
+            <Text style={styles.podiumSets}>{(visibleData[1]?.totalCartoons || 0)} c · {(visibleData[1]?.totalLots || 0)} l</Text>
           </View>
           <View style={[styles.podiumItem, styles.podiumFirst]}>
             <Text style={styles.podiumMedal}>1</Text>
-            <Text style={styles.podiumName} numberOfLines={1}>{data[0]?.name}</Text>
-            <Text style={styles.podiumSets}>{(data[0]?.totalCartoons || 0)} c · {(data[0]?.totalLots || 0)} l</Text>
+            <Text style={styles.podiumName} numberOfLines={1}>{visibleData[0]?.name}</Text>
+            <Text style={styles.podiumSets}>{(visibleData[0]?.totalCartoons || 0)} c · {(visibleData[0]?.totalLots || 0)} l</Text>
           </View>
           <View style={[styles.podiumItem, styles.podiumThird]}>
             <Text style={styles.podiumMedal}>3</Text>
-            <Text style={styles.podiumName} numberOfLines={1}>{data[2]?.name}</Text>
-            <Text style={styles.podiumSets}>{(data[2]?.totalCartoons || 0)} c · {(data[2]?.totalLots || 0)} l</Text>
+            <Text style={styles.podiumName} numberOfLines={1}>{visibleData[2]?.name}</Text>
+            <Text style={styles.podiumSets}>{(visibleData[2]?.totalCartoons || 0)} c · {(visibleData[2]?.totalLots || 0)} l</Text>
           </View>
         </View>
       )}
@@ -88,7 +118,7 @@ export default function LeaderboardScreen() {
         <LoadingState />
       ) : (
         <FlatList
-          data={data}
+          data={visibleData}
           keyExtractor={(item) => item.id}
           renderItem={({ item }) => (
             <LeaderboardRow

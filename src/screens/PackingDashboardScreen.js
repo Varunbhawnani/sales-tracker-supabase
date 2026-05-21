@@ -4,6 +4,7 @@ import {
 } from 'react-native';
 import { COLORS, STATUS, SAFE_TOP } from '../utils/constants';
 import { useAuth } from '../contexts/AuthContext';
+import { useGodownFilter } from '../contexts/GodownFilterContext';
 import { subscribeToQueriesByStatuses, markPacked, undoPacked } from '../services/queryService';
 import StatusBadge from '../components/StatusBadge';
 import TierBadge from '../components/TierBadge';
@@ -12,55 +13,61 @@ import EmptyState from '../components/EmptyState';
 import NotificationBell from '../components/NotificationBell';
 import Toast from 'react-native-toast-message';
 
-const PACKING_STATUSES = [STATUS.VERIFIED_PENDING_DISPATCH];
+// The packing dashboard subscribes to verified+completed queries so the
+// "In Dispatch" tab (read-only) can show items that have already been packed
+// and are waiting on the dispatch team. The "To Pack" tab is the editable
+// list the packer actually acts on.
+const PACKING_VISIBLE_STATUSES = [STATUS.VERIFIED_PENDING_DISPATCH, STATUS.COMPLETED];
 const UNDO_WINDOW_MS = 3 * 60 * 1000;
 
 const TABS = [
-  { key: 'pending', label: 'To Pack' },
-  { key: 'packed',  label: 'Packed' },
+  { key: 'to_pack',     label: 'To Pack' },
+  { key: 'in_dispatch', label: 'In Dispatch (view only)' },
 ];
 
-export default function PackingDashboardScreen() {
+export default function PackingDashboardScreen({ navigation }) {
   const { logout, userName } = useAuth();
+  const { filterQueries } = useGodownFilter();
   const [queries, setQueries] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [tab, setTab] = useState('pending');
-  // Tick state so the undo countdown re-renders every 5 sec
+  const [tab, setTab] = useState('to_pack');
+  // Tick state so the 3-min undo countdown re-renders every 5 sec.
   const [, setTick] = useState(0);
 
   useEffect(() => {
-    const unsub = subscribeToQueriesByStatuses(PACKING_STATUSES, (data) => {
+    const unsub = subscribeToQueriesByStatuses(PACKING_VISIBLE_STATUSES, (data) => {
       setQueries(data);
       setLoading(false);
       setRefreshing(false);
     });
-    const interval = setInterval(() => setTick(t => t + 1), 5000);
+    const interval = setInterval(() => setTick((t) => t + 1), 5000);
     return () => { unsub(); clearInterval(interval); };
   }, []);
 
-  const stats = useMemo(() => {
-    const pending = queries.filter(q => !q.isPacked).length;
-    const packed = queries.filter(q => q.isPacked).length;
-    return { pending, packed };
-  }, [queries]);
+  // Godown scope applied once; both tabs derive from the filtered list.
+  const scopedQueries = useMemo(() => filterQueries(queries), [queries, filterQueries]);
+  const toPack = useMemo(
+    () => scopedQueries.filter(q => q.status === STATUS.VERIFIED_PENDING_DISPATCH && !q.isPacked),
+    [scopedQueries],
+  );
+  const inDispatch = useMemo(
+    () => scopedQueries.filter(q => q.status === STATUS.VERIFIED_PENDING_DISPATCH && q.isPacked),
+    [scopedQueries],
+  );
 
-  const filtered = useMemo(() => {
-    if (tab === 'pending') return queries.filter(q => !q.isPacked);
-    if (tab === 'packed') return queries.filter(q => q.isPacked);
-    return queries;
-  }, [queries, tab]);
-
-  const tabsWithCounts = TABS.map(t => ({
+  const tabsWithCounts = TABS.map((t) => ({
     ...t,
-    count: t.key === 'pending' ? stats.pending : stats.packed,
+    count: t.key === 'to_pack' ? toPack.length : inDispatch.length,
   }));
+
+  const list = tab === 'to_pack' ? toPack : inDispatch;
 
   const handleToggle = async (q) => {
     try {
       if (q.isPacked) {
         await undoPacked(q.id);
-        Toast.show({ type: 'info', text1: 'Undone — back to "To Pack"', position: 'bottom' });
+        Toast.show({ type: 'info', text1: 'Undone — back to To Pack', position: 'bottom' });
       } else {
         await markPacked(q.id);
         Toast.show({ type: 'success', text1: 'Marked packed', text2: '3 min to undo', position: 'bottom' });
@@ -80,10 +87,39 @@ export default function PackingDashboardScreen() {
   if (loading) return null;
 
   const renderItem = ({ item }) => {
-    const packedMsAgo = item.packedAt ? (Date.now() - item.packedAt.getTime()) : 0;
-    const undoLeftMs = Math.max(0, UNDO_WINDOW_MS - packedMsAgo);
-    const canUndo = item.isPacked && undoLeftMs > 0;
-    const lockedMessage = item.isPacked && undoLeftMs === 0;
+    const isOwnTab = tab === 'to_pack';
+    // To Pack rows: editable; show the Mark Packed CTA (and undo if recently
+    // packed). In Dispatch rows: read-only, just show the status.
+    let actionEl = null;
+    if (isOwnTab) {
+      if (item.isPacked) {
+        const packedMsAgo = item.packedAt ? Date.now() - item.packedAt.getTime() : 0;
+        const undoLeftMs = Math.max(0, UNDO_WINDOW_MS - packedMsAgo);
+        actionEl = undoLeftMs > 0 ? (
+          <TouchableOpacity style={[styles.toggleBtn, styles.undoBtn]} onPress={() => handleToggle(item)}>
+            <Text style={styles.undoText}>↩ Undo (locks in {Math.ceil(undoLeftMs / 1000)}s)</Text>
+          </TouchableOpacity>
+        ) : (
+          <View style={[styles.toggleBtn, styles.lockedBtn]}>
+            <Text style={styles.lockedText}>🔒 Locked — handed off to dispatch</Text>
+          </View>
+        );
+      } else {
+        actionEl = (
+          <TouchableOpacity style={[styles.toggleBtn, styles.packBtn]} onPress={() => handleToggle(item)}>
+            <Text style={styles.packBtnText}>✓ Mark Packed</Text>
+          </TouchableOpacity>
+        );
+      }
+    } else {
+      // Read-only badge for items that have moved to the dispatch team's queue.
+      actionEl = (
+        <View style={[styles.toggleBtn, styles.viewOnlyBtn]}>
+          <Text style={styles.viewOnlyText}>📦 Awaiting dispatch (view only)</Text>
+        </View>
+      );
+    }
+
     return (
       <View style={[styles.card, item.isPacked && styles.cardPacked]}>
         <View style={styles.cardTop}>
@@ -106,21 +142,7 @@ export default function PackingDashboardScreen() {
 
         {item.claimedBy && <Text style={styles.metaText}>Sales: {item.claimedBy.name}</Text>}
 
-        {item.isPacked ? (
-          canUndo ? (
-            <TouchableOpacity style={[styles.toggleBtn, styles.undoBtn]} onPress={() => handleToggle(item)}>
-              <Text style={styles.undoText}>↩ Undo (locks in {Math.ceil(undoLeftMs/1000)}s)</Text>
-            </TouchableOpacity>
-          ) : (
-            <View style={[styles.toggleBtn, styles.lockedBtn]}>
-              <Text style={styles.lockedText}>🔒 Locked — sent to dispatch</Text>
-            </View>
-          )
-        ) : (
-          <TouchableOpacity style={[styles.toggleBtn, styles.packBtn]} onPress={() => handleToggle(item)}>
-            <Text style={styles.packBtnText}>✓ Mark Packed</Text>
-          </TouchableOpacity>
-        )}
+        {actionEl}
       </View>
     );
   };
@@ -132,6 +154,12 @@ export default function PackingDashboardScreen() {
           <Text style={styles.headerTitle}>Packing Dashboard</Text>
           <Text style={styles.headerSubtitle}>Hi, {userName || 'User'}</Text>
         </View>
+        <TouchableOpacity
+          style={styles.logoutBtn}
+          onPress={() => navigation?.navigate?.('Responsibilities')}
+        >
+          <Text style={styles.logoutText}>📋 My Role</Text>
+        </TouchableOpacity>
         <NotificationBell style={{ marginRight: 8 }} />
         <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>
           <Text style={styles.logoutText}>Logout</Text>
@@ -139,19 +167,36 @@ export default function PackingDashboardScreen() {
       </View>
 
       <View style={styles.statsRow}>
-        <View style={styles.statBox}><Text style={styles.statValue}>{stats.pending}</Text><Text style={styles.statLabel}>To Pack</Text></View>
-        <View style={styles.statBox}><Text style={[styles.statValue, { color: COLORS.completed }]}>{stats.packed}</Text><Text style={styles.statLabel}>Packed</Text></View>
+        <View style={styles.statBox}>
+          <Text style={styles.statValue}>{toPack.length}</Text>
+          <Text style={styles.statLabel}>To Pack</Text>
+        </View>
+        <View style={styles.statBox}>
+          <Text style={[styles.statValue, { color: COLORS.warning }]}>{inDispatch.length}</Text>
+          <Text style={styles.statLabel}>In Dispatch</Text>
+        </View>
       </View>
 
       <FilterTabs tabs={tabsWithCounts} activeTab={tab} onTabChange={setTab} />
 
       <FlatList
-        data={filtered}
+        data={list}
         keyExtractor={(it) => it.id}
         renderItem={renderItem}
-        contentContainerStyle={[styles.list, filtered.length === 0 && styles.emptyList]}
-        ListEmptyComponent={<EmptyState title="All clear!" message={tab === 'pending' ? 'Nothing to pack right now.' : 'Nothing packed yet today.'} />}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); setTimeout(() => setRefreshing(false), 800); }} colors={[COLORS.primary]} />}
+        contentContainerStyle={[styles.list, list.length === 0 && styles.emptyList]}
+        ListEmptyComponent={
+          <EmptyState
+            title="All clear!"
+            message={tab === 'to_pack' ? 'Nothing waiting to pack.' : 'Nothing currently with dispatch.'}
+          />
+        }
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => { setRefreshing(true); setTimeout(() => setRefreshing(false), 800); }}
+            colors={[COLORS.primary]}
+          />
+        }
         showsVerticalScrollIndicator={false}
       />
     </View>
@@ -172,7 +217,7 @@ const styles = StyleSheet.create({
   list: { padding: 16, paddingBottom: 40 },
   emptyList: { flex: 1 },
   card: { backgroundColor: COLORS.surface, borderRadius: 16, padding: 14, marginBottom: 10 },
-  cardPacked: { borderLeftWidth: 4, borderLeftColor: COLORS.completed, opacity: 0.9 },
+  cardPacked: { borderLeftWidth: 4, borderLeftColor: COLORS.warning, opacity: 0.95 },
   cardTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
   nameRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 8 },
   customerName: { fontSize: 16, fontFamily: 'Inter_600SemiBold', color: COLORS.textPrimary, flexShrink: 1 },
@@ -188,4 +233,6 @@ const styles = StyleSheet.create({
   undoText: { fontSize: 13, fontFamily: 'Inter_600SemiBold', color: COLORS.textSecondary },
   lockedBtn: { backgroundColor: COLORS.background },
   lockedText: { fontSize: 12, fontFamily: 'Inter_500Medium', color: COLORS.textTertiary },
+  viewOnlyBtn: { backgroundColor: COLORS.background, borderWidth: 1, borderColor: COLORS.divider },
+  viewOnlyText: { fontSize: 12, fontFamily: 'Inter_500Medium', color: COLORS.textTertiary },
 });

@@ -4,11 +4,14 @@ import { COLORS, STATUS } from '../utils/constants';
 import StatusBadge from './StatusBadge';
 import TierBadge from './TierBadge';
 import { relativeTime } from '../utils/timeUtils';
-import { formatQuantity } from '../utils/formatUtils';
 
 function QueryCard({ query, onPress }) {
   const displayName = query.customerName || query.partyName || 'Unknown';
-  const displayQty = query.requiredSets || query.quantityRequested || 0;
+  // Cartoons + lots are the live unit; required_sets is only meaningful for
+  // legacy queries that pre-date the cartoons/lots split.
+  const cartoons = query.cartoons || 0;
+  const lots = query.lots || 0;
+  const hasUnits = (cartoons + lots) > 0;
   const isSnoozed = query.status === STATUS.SNOOZED;
 
   return (
@@ -29,7 +32,9 @@ function QueryCard({ query, onPress }) {
             <TierBadge category={query.customerCategory} style={{ marginLeft: 6 }} />
           )}
         </View>
-        <Text style={styles.quantity}>{formatQuantity(displayQty)}</Text>
+        <Text style={styles.quantity}>
+          {hasUnits ? `${cartoons}c · ${lots}l` : '—'}
+        </Text>
       </View>
 
       {/* Projected Revenue */}
@@ -70,10 +75,10 @@ function QueryCard({ query, onPress }) {
         </Text>
       )}
 
-      {/* Dispatch progress */}
-      {(query.status === STATUS.PARTIALLY_DISPATCHED || query.status === STATUS.COMPLETED) && (
+      {/* Dispatch confirmation */}
+      {query.status === STATUS.COMPLETED && (
         <Text style={styles.dispatchInfo}>
-          Dispatched: {query.dispatchedSets || 0} / {query.requiredSets || 0} sets
+          Dispatched: {cartoons} cartons · {lots} lots
         </Text>
       )}
     </TouchableOpacity>

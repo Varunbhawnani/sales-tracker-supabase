@@ -1,5 +1,19 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { StatusBar, View, StyleSheet } from 'react-native';
+import { StatusBar, View, StyleSheet, LogBox } from 'react-native';
+
+// The Supabase client logs "AuthApiError: Invalid Refresh Token" as a
+// console.error any time it can't refresh a stored session — for example
+// after the refresh token expires, when an owner deletes the auth user, or
+// when AsyncStorage holds a session from a different Supabase project. The
+// SDK already handles it (clears the session, emits SIGNED_OUT, app falls
+// through to the login screen), but it surfaces as a noisy red LogBox during
+// development. Silence the LogBox match without losing the actual flow.
+LogBox.ignoreLogs([
+  'Invalid Refresh Token',
+  'AuthApiError: Invalid Refresh Token',
+  // Supabase 2.x sometimes emits this when an expired session is cleared:
+  'AuthSessionMissingError',
+]);
 import { NavigationContainer, useNavigationContainerRef } from '@react-navigation/native';
 import {
   useFonts,
@@ -14,6 +28,7 @@ import Toast from 'react-native-toast-message';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { AuthProvider, useAuth } from './src/contexts/AuthContext';
+import { GodownFilterProvider } from './src/contexts/GodownFilterContext';
 import AppNavigator from './src/navigation/AppNavigator';
 import LoginScreen from './src/screens/LoginScreen';
 import LoadingState from './src/components/LoadingState';
@@ -116,7 +131,9 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <AuthProvider>
-        <AppContent />
+        <GodownFilterProvider>
+          <AppContent />
+        </GodownFilterProvider>
       </AuthProvider>
     </SafeAreaProvider>
   );

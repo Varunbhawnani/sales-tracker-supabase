@@ -24,6 +24,8 @@
       "package": "com.salestracker.app",
       "permissions": [
         "NOTIFICATIONS",
+        "WRITE_EXTERNAL_STORAGE",
+        "NOTIFICATIONS",
         "WRITE_EXTERNAL_STORAGE"
       ]
     },
@@ -51,6 +53,9 @@
       "eas": {
         "projectId": "2bab2548-56ee-40f8-8c83-8e1a20817999"
       }
+    },
+    "updates": {
+      "url": "https://u.expo.dev/2bab2548-56ee-40f8-8c83-8e1a20817999"
     }
   }
 }

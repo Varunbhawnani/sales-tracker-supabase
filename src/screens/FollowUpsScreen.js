@@ -4,11 +4,13 @@ import {
 } from 'react-native';
 import { COLORS, SAFE_TOP } from '../utils/constants';
 import { useAuth } from '../contexts/AuthContext';
-import { subscribeToFollowUps, resolveFollowUp } from '../services/queryService';
+import { subscribeToFollowUps, pickupFollowUp } from '../services/queryService';
 import { relativeTime, formatDateIST } from '../utils/timeUtils';
 import EmptyState from '../components/EmptyState';
 import LoadingState from '../components/LoadingState';
 import NotificationBell from '../components/NotificationBell';
+import GodownFilterChip from '../components/GodownFilterChip';
+import { useGodownFilter } from '../contexts/GodownFilterContext';
 import Toast from 'react-native-toast-message';
 
 const FILTER_TABS = [
@@ -19,6 +21,7 @@ const FILTER_TABS = [
 
 export default function FollowUpsScreen({ navigation }) {
   const { userId, isOwner } = useAuth();
+  const { filterQueries } = useGodownFilter();
   const [followUps, setFollowUps] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -33,23 +36,43 @@ export default function FollowUpsScreen({ navigation }) {
     return () => unsub();
   }, []);
 
+  // Apply owner's godown filter first (no-op for other roles), then the
+  // origin tab. Sort dated follow-ups first by upcoming date; undated ones
+  // sink to the bottom. Counts below also reflect the godown scope.
+  const godownScoped = useMemo(() => filterQueries(followUps), [followUps, filterQueries]);
+  const sorted = useMemo(() => {
+    const arr = [...godownScoped];
+    arr.sort((a, b) => {
+      const da = a.followUpDate ? a.followUpDate.getTime() : null;
+      const db = b.followUpDate ? b.followUpDate.getTime() : null;
+      if (da === null && db === null) return 0;
+      if (da === null) return 1;
+      if (db === null) return -1;
+      return da - db;
+    });
+    return arr;
+  }, [godownScoped]);
   const filtered = useMemo(() => {
-    if (filter === 'all') return followUps;
-    return followUps.filter(q => q.followUpOrigin === filter);
-  }, [followUps, filter]);
+    if (filter === 'all') return sorted;
+    return sorted.filter(q => q.followUpOrigin === filter);
+  }, [sorted, filter]);
 
   const handleOpenQuery = useCallback((query) => {
     navigation.navigate('QueryDetail', { queryId: query.id, query });
   }, [navigation]);
 
-  const handleResolve = useCallback(async (queryId) => {
+  // Pick up = move the query back to claimed_by_sales so the 3 standard
+  // actions (Mark Booked / Snooze / Cancel) are available again. Then
+  // navigate into the QueryDetail screen so the user can act immediately.
+  const handlePickup = useCallback(async (item) => {
     try {
-      await resolveFollowUp(queryId);
-      Toast.show({ type: 'success', text1: 'Follow-up resolved', position: 'bottom' });
+      await pickupFollowUp(item.id);
+      Toast.show({ type: 'success', text1: 'Picked up', text2: 'Choose Mark Booked / Snooze / Cancel', position: 'bottom' });
+      navigation.navigate('QueryDetail', { queryId: item.id });
     } catch (e) {
-      Alert.alert('Error', e.message || 'Failed to resolve.');
+      Alert.alert('Error', e.message || 'Failed to pick up follow-up.');
     }
-  }, []);
+  }, [navigation]);
 
   if (loading) return <LoadingState />;
 
@@ -79,9 +102,9 @@ export default function FollowUpsScreen({ navigation }) {
         {item.claimedBy && (
           <Text style={styles.metaText}>Sales: {item.claimedBy.name}</Text>
         )}
-        {item.followUpOrigin === 'snoozed' && item.followUpDate && (
-          <Text style={styles.metaText}>
-            Follow-up: {item.followUpDate.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
+        {item.followUpDate && (
+          <Text style={[styles.metaText, { color: COLORS.primary, fontFamily: 'Inter_600SemiBold' }]}>
+            📅 {item.followUpDate.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
           </Text>
         )}
       </View>
@@ -89,9 +112,9 @@ export default function FollowUpsScreen({ navigation }) {
       <View style={styles.actions}>
         <TouchableOpacity
           style={[styles.actionBtn, styles.resolveBtn]}
-          onPress={(e) => { e.stopPropagation?.(); handleResolve(item.id); }}
+          onPress={(e) => { e.stopPropagation?.(); handlePickup(item); }}
         >
-          <Text style={styles.resolveBtnText}>✓ Mark Resolved</Text>
+          <Text style={styles.resolveBtnText}>↗ Pick Up</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.actionBtn, styles.openBtn]}
@@ -104,9 +127,9 @@ export default function FollowUpsScreen({ navigation }) {
   );
 
   const counts = {
-    all: followUps.length,
-    booked: followUps.filter(q => q.followUpOrigin === 'booked').length,
-    snoozed: followUps.filter(q => q.followUpOrigin === 'snoozed').length,
+    all: godownScoped.length,
+    booked: godownScoped.filter(q => q.followUpOrigin === 'booked').length,
+    snoozed: godownScoped.filter(q => q.followUpOrigin === 'snoozed').length,
   };
 
   return (
@@ -118,6 +141,7 @@ export default function FollowUpsScreen({ navigation }) {
             {isOwner ? 'All team follow-ups' : 'Things waiting on you'}
           </Text>
         </View>
+        <GodownFilterChip compact />
         <NotificationBell />
       </View>
 

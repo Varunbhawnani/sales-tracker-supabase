@@ -147,10 +147,16 @@ export const VALID_TRANSITIONS = {
 };
 
 // ─── ROLES ───
+// 'operations' is the merged Packing + Dispatch role. PACKING and DISPATCH
+// remain in the enum so legacy users / historical attribution on queries
+// (packed_by_user_id, dispatched_by_user_id) keep displaying correctly; new
+// users created via the Admin panel pick from OWNER/SALESPERSON/ACCOUNTS/
+// OPERATIONS only.
 export const ROLES = {
   OWNER: 'owner',
   SALESPERSON: 'salesperson',
   ACCOUNTS: 'accounts',
+  OPERATIONS: 'operations',
   PACKING: 'packing',
   DISPATCH: 'dispatch',
 };

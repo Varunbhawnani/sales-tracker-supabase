@@ -7,6 +7,7 @@ import {
 import { COLORS } from '../utils/constants';
 import { useAuth } from '../contexts/AuthContext';
 import { createQuery } from '../services/queryService';
+import { useGodownFilter } from '../contexts/GodownFilterContext';
 import {
   getCachedCustomers,
   getCachedProducts,
@@ -20,8 +21,13 @@ import ProductSelector from '../components/ProductSelector';
 import Toast from 'react-native-toast-message';
 
 export default function NewQueryScreen({ navigation, route }) {
-  const { userId, userName } = useAuth();
+  const { userId, userName, userGodownId } = useAuth();
+  const { godowns } = useGodownFilter();
   const prefilledCustomer = route?.params?.customer || null;
+  // Active godowns the user can attach to this query. The list itself comes
+  // from the godowns realtime subscription in GodownFilterContext so we
+  // don't pay for our own listener here.
+  const activeGodowns = (godowns || []).filter((g) => g.isActive);
 
   // Form state. Order on screen (top → bottom):
   //   1. Origin: Online / Offline (required)
@@ -39,6 +45,9 @@ export default function NewQueryScreen({ navigation, route }) {
   const [submitting, setSubmitting] = useState(false);
   const [loadingData, setLoadingData] = useState(true);
   const [backgroundLoading, setBackgroundLoading] = useState(false);
+  // Default the godown to the user's assigned one; can be overridden or
+  // cleared to null (visible to all). Owners with no godown default to None.
+  const [selectedGodownId, setSelectedGodownId] = useState(userGodownId || null);
 
   useLayoutEffect(() => {
     navigation.setOptions({
@@ -120,6 +129,7 @@ export default function NewQueryScreen({ navigation, route }) {
         notes: notes.trim(),
         userId,
         userName,
+        godownId: selectedGodownId || null,
       });
 
       // Fire-and-forget the push notification (non-blocking).
@@ -207,6 +217,39 @@ export default function NewQueryScreen({ navigation, route }) {
           )}
         </View>
 
+        {/* ─── Godown ─── */}
+        {/* Optional. Picking a godown scopes who can see this query.
+            Leaving it as "None" makes the query visible to everyone. */}
+        <View style={styles.fieldGroup}>
+          <Text style={styles.label}>Godown (optional)</Text>
+          <View style={styles.godownRow}>
+            <TouchableOpacity
+              style={[styles.godownChip, !selectedGodownId && styles.godownChipActive]}
+              onPress={() => setSelectedGodownId(null)}
+            >
+              <Text style={[styles.godownChipText, !selectedGodownId && styles.godownChipTextActive]}>
+                None (visible to all)
+              </Text>
+            </TouchableOpacity>
+            {activeGodowns.map((g) => (
+              <TouchableOpacity
+                key={g.id}
+                style={[styles.godownChip, selectedGodownId === g.id && styles.godownChipActive]}
+                onPress={() => setSelectedGodownId(g.id)}
+              >
+                <Text style={[styles.godownChipText, selectedGodownId === g.id && styles.godownChipTextActive]}>
+                  {g.name}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+          {activeGodowns.length === 0 && (
+            <Text style={styles.loadingHint}>
+              No godowns created yet. The owner can add them in the Admin panel.
+            </Text>
+          )}
+        </View>
+
         {/* ─── 3. Notes (required) ─── */}
         <View style={styles.fieldGroup}>
           <Text style={styles.label}>Notes *</Text>
@@ -262,6 +305,11 @@ const styles = StyleSheet.create({
   fieldGroup: { marginBottom: 22 },
   label: { fontSize: 13, fontFamily: 'Inter_600SemiBold', color: COLORS.textSecondary, marginBottom: 8, marginLeft: 4 },
   loadingHint: { fontSize: 11, fontFamily: 'Inter_400Regular', color: COLORS.textTertiary },
+  godownRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 6 },
+  godownChip: { borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8, borderWidth: 1, borderColor: COLORS.border, backgroundColor: COLORS.surface },
+  godownChipActive: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
+  godownChipText: { fontSize: 12, fontFamily: 'Inter_600SemiBold', color: COLORS.textSecondary },
+  godownChipTextActive: { color: COLORS.white },
   helper: { fontSize: 11, fontFamily: 'Inter_400Regular', color: COLORS.textTertiary, marginTop: 6, marginLeft: 4 },
   inputContainer: { backgroundColor: COLORS.surface, borderRadius: 14, borderWidth: 1, borderColor: COLORS.border, paddingHorizontal: 14 },
   input: { paddingVertical: 14, fontSize: 15, fontFamily: 'Inter_400Regular', color: COLORS.textPrimary },

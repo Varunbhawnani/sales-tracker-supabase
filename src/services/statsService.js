@@ -1,4 +1,4 @@
-import { supabase, subscribeToTable } from '../lib/supabase';
+import { supabase } from '../lib/supabase';
 import { STATUS, LEGACY_STATUS, TIME_PERIODS } from '../utils/constants';
 
 const WON_STATUSES = [
@@ -39,24 +39,6 @@ function periodStart(period) {
     case TIME_PERIODS.ALL_TIME:
     default: return null;
   }
-}
-
-// Subscribing to salesperson_stats lives here for legacy callers, but the
-// numbers shown in the UI now ALWAYS recompute from queries so accounts-edits
-// to cartoons/lots immediately reflect in everyone's stats.
-let _statsChannelCounter = 0;
-export function subscribeToSalespersonStats(callback) {
-  const initial = async () => {
-    const data = await getLeaderboardData(TIME_PERIODS.ALL_TIME);
-    callback(data);
-  };
-  initial();
-  _statsChannelCounter += 1;
-  const channel = supabase
-    .channel(`public:queries:stats:${_statsChannelCounter}`)
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'queries' }, initial)
-    .subscribe();
-  return () => channel.unsubscribe();
 }
 
 // ─── Pure computation: returns leaderboard rows for the given period ─────

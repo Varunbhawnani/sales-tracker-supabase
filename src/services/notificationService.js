@@ -81,9 +81,12 @@ export async function sendNewQueryNotification(partyName, sets, queryId, exclude
     const tokens = (users || []).map(u => u.expo_push_token).filter(Boolean);
     if (tokens.length === 0) return;
 
+    // `sets` is a free-form quantity tag passed by the caller (kept loose so
+     // we don't break any older call sites). The notification body keeps it
+     // generic — "new query raised" — rather than baking a unit into the copy.
     const messages = tokens.map(token => ({
       to: token, sound: 'default',
-      title: 'New Query', body: `${partyName} — ${sets} Sets`,
+      title: 'New Query', body: `${partyName} — new query raised`,
       data: { queryId },
     }));
 

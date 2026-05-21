@@ -16,7 +16,6 @@ import BottomSheet from '../components/BottomSheet';
 import ConfirmDialog from '../components/ConfirmDialog';
 import LoadingState from '../components/LoadingState';
 import { relativeTime, formatDateIST } from '../utils/timeUtils';
-import { formatQuantity } from '../utils/formatUtils';
 import Toast from 'react-native-toast-message';
 
 export default function QueryDetailScreen({ navigation, route }) {
@@ -34,6 +33,9 @@ export default function QueryDetailScreen({ navigation, route }) {
   const [cartoonsInput, setCartoonsInput] = useState('');
   const [lotsInput, setLotsInput] = useState('');
   const [bookedFollowUp, setBookedFollowUp] = useState('');
+  // Optional follow-up date for the Booked sheet. Null = no date attached.
+  const [bookedFollowUpDate, setBookedFollowUpDate] = useState(null);
+  const [showBookedDatePicker, setShowBookedDatePicker] = useState(false);
   // Snooze sheet inputs (note is now mandatory)
   const [snoozeNote, setSnoozeNote] = useState('');
   const [followUpDate, setFollowUpDate] = useState(new Date(Date.now() + 86400000));
@@ -80,11 +82,12 @@ export default function QueryDetailScreen({ navigation, route }) {
     }
     setSubmitting(true);
     try {
-      await markWon(queryId, c, l, bookedFollowUp);
+      await markWon(queryId, c, l, bookedFollowUp, bookedFollowUpDate);
       setShowWonSheet(false);
       setCartoonsInput('');
       setLotsInput('');
       setBookedFollowUp('');
+      setBookedFollowUpDate(null);
       Toast.show({ type: 'success', text1: 'Marked as Booked!', position: 'bottom' });
     } catch (error) {
       Alert.alert('Error', error.message || 'Failed to update.');
@@ -293,12 +296,14 @@ export default function QueryDetailScreen({ navigation, route }) {
             <Text style={[styles.timestamp, { color: COLORS.warning }]}>Note: {query.verificationNote}</Text>
           )}
 
-          {(query.status === STATUS.PARTIALLY_DISPATCHED || query.status === STATUS.COMPLETED) && (
+          {query.status === STATUS.COMPLETED && (
             <>
               <View style={styles.separator} />
               <View style={styles.detailRow}>
                 <Text style={styles.detailLabel}>Dispatched</Text>
-                <Text style={styles.detailValue}>{query.dispatchedSets || 0} / {query.requiredSets || 0} sets</Text>
+                <Text style={styles.detailValue}>
+                  {query.cartoons || 0} cartons · {query.lots || 0} lots
+                </Text>
               </View>
             </>
           )}
@@ -377,6 +382,38 @@ export default function QueryDetailScreen({ navigation, route }) {
           placeholderTextColor={COLORS.textTertiary}
           value={bookedFollowUp} onChangeText={setBookedFollowUp} multiline />
         <Text style={styles.sheetHelper}>Anything more the customer wanted that's not in this booking. Shows up in the Follow-Ups tab.</Text>
+
+        {/* Optional follow-up date — visible only when a note has been typed
+            because a date without a follow-up note doesn't make much sense. */}
+        {bookedFollowUp.trim().length > 0 && (
+          <>
+            <Text style={[styles.sheetLabel, { marginTop: 14 }]}>Follow-up date (optional)</Text>
+            <TouchableOpacity
+              style={[styles.sheetInput, { paddingVertical: 14 }]}
+              onPress={() => setShowBookedDatePicker(true)}
+            >
+              <Text style={{ color: bookedFollowUpDate ? COLORS.textPrimary : COLORS.textTertiary, fontFamily: 'Inter_500Medium' }}>
+                {bookedFollowUpDate
+                  ? bookedFollowUpDate.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })
+                  : 'Pick a date (optional)'}
+              </Text>
+            </TouchableOpacity>
+            {bookedFollowUpDate && (
+              <TouchableOpacity onPress={() => setBookedFollowUpDate(null)} style={{ marginTop: -8, marginBottom: 10 }}>
+                <Text style={{ color: COLORS.danger, fontSize: 12, fontFamily: 'Inter_500Medium' }}>Clear date</Text>
+              </TouchableOpacity>
+            )}
+            {showBookedDatePicker && (
+              <PlatformDatePicker
+                value={bookedFollowUpDate || new Date(Date.now() + 86400000)}
+                mode="date"
+                minimumDate={new Date()}
+                onChange={(d) => { setShowBookedDatePicker(false); if (d) setBookedFollowUpDate(d); }}
+                onCancel={() => setShowBookedDatePicker(false)}
+              />
+            )}
+          </>
+        )}
 
         <TouchableOpacity style={[styles.sheetButton, { backgroundColor: COLORS.wonPendingAccounts, marginTop: 16 }]} onPress={handleMarkWon} disabled={submitting}>
           {submitting ? <ActivityIndicator color={COLORS.white} /> : <Text style={styles.sheetButtonText}>Confirm Booked</Text>}

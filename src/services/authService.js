@@ -1,4 +1,4 @@
-import { supabase } from '../lib/supabase';
+import { supabase, subscribeToTable } from '../lib/supabase';
 import { EMAIL_DOMAIN, ROLES } from '../utils/constants';
 
 /**
@@ -15,12 +15,13 @@ import { EMAIL_DOMAIN, ROLES } from '../utils/constants';
  * "Confirm email" toggle, no SMTP rate-limit). The owner's session stays
  * intact throughout — no signOut/re-login dance like the old signUp approach.
  */
-export async function createUser(name, username, password, role = ROLES.SALESPERSON) {
+export async function createUser(name, username, password, role = ROLES.SALESPERSON, godownId = null) {
   const { data, error } = await supabase.rpc('admin_create_user', {
     p_username: username.trim().toLowerCase(),
     p_password: password,
     p_name: name.trim(),
     p_role: role,
+    p_godown_id: godownId || null,
   });
   if (error) throw new Error(error.message);
   if (!data?.success) throw new Error(data?.message || 'Failed to create user.');
@@ -29,6 +30,7 @@ export async function createUser(name, username, password, role = ROLES.SALESPER
     name: name.trim(),
     username: username.trim().toLowerCase(),
     role,
+    godownId: godownId || null,
   };
 }
 
@@ -39,15 +41,34 @@ export async function getAllUsers() {
   return data.map(rowToUser);
 }
 
-export async function getUsersByRole(role) {
-  const { data, error } = await supabase
-    .from('users').select('*').eq('role', role).order('name', { ascending: true });
-  if (error) throw error;
-  return data.map(rowToUser);
-}
+/**
+ * Realtime subscription to the users table. The Admin screen was previously
+ * a one-shot getAllUsers() — a new user created by one owner wouldn't show
+ * up on another owner's session until they reloaded. With this, the list
+ * stays live across all sessions.
+ */
+export function subscribeToUsers(callback) {
+  let inFlight = false;
+  let dirty = false;
 
-export async function getAllSalespeople() {
-  return getUsersByRole(ROLES.SALESPERSON);
+  const refresh = async () => {
+    if (inFlight) { dirty = true; return; }
+    inFlight = true;
+    try {
+      dirty = false;
+      const list = await getAllUsers();
+      callback(list);
+    } catch (e) {
+      console.error('users refresh failed:', e);
+    } finally {
+      inFlight = false;
+      if (dirty) refresh();
+    }
+  };
+
+  refresh();
+  const channel = subscribeToTable('users', '*', refresh);
+  return () => { channel.unsubscribe(); };
 }
 
 export async function deactivateUser(userId) {
@@ -68,12 +89,6 @@ export async function updateUserRole(userId, newRole) {
   if (error) throw error;
 }
 
-// Legacy aliases (carried over from Firebase version's compatibility shims)
-export const createSalesperson = (name, username, password) =>
-  createUser(name, username, password, ROLES.SALESPERSON);
-export const deactivateSalesperson = deactivateUser;
-export const reactivateSalesperson = reactivateUser;
-
 function rowToUser(row) {
   return {
     id: row.id,
@@ -83,6 +98,7 @@ function rowToUser(row) {
     role: row.role,
     isActive: row.is_active,
     expoPushToken: row.expo_push_token,
+    godownId: row.godown_id || null,
     createdAt: row.created_at,
   };
 }

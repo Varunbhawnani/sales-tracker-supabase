@@ -12,6 +12,8 @@ import EmptyState from '../components/EmptyState';
 import LoadingState from '../components/LoadingState';
 import ExportButton from '../components/ExportButton';
 import NotificationBell from '../components/NotificationBell';
+import GodownFilterChip from '../components/GodownFilterChip';
+import { useGodownFilter } from '../contexts/GodownFilterContext';
 
 // Grouped filter key for the dispatch pipeline (covers both states).
 // Other tabs map 1:1 to a single status.
@@ -47,6 +49,7 @@ function matchesFilter(query, filterKey) {
 
 export default function FeedScreen({ navigation }) {
   const { logout, userName, isOwner, isSalesperson } = useAuth();
+  const { filterQueries } = useGodownFilter();
   const [queries, setQueries] = useState([]);
   // Default to "Open" — the queries waiting to be claimed. This is what
   // salespersons need to see first; owners can flip to "All" if they want
@@ -68,14 +71,18 @@ export default function FeedScreen({ navigation }) {
     return () => unsubscribe();
   }, []);
 
+  // Owner-only: scope to the selected godown if one is chosen. For non-owner
+  // roles filterQueries is a no-op, so this line is free for everyone else.
+  const godownScoped = filterQueries(queries);
+
   // Salesperson view: keep ALL active-stage queries (Booked → Verifying →
   // Verified → Partial), so the salesperson can track each query's progress.
   // But cap completed queries to the most recent SALES_COMPLETED_LIMIT — old
   // wins still appear in My Stats, no need to clutter the feed indefinitely.
-  let visibleQueries = queries;
+  let visibleQueries = godownScoped;
   if (isSalesperson) {
     const recentCompletedIds = new Set(
-      queries
+      godownScoped
         .filter(q => COMPLETED_STATUSES.includes(q.status))
         .sort((a, b) => {
           const ta = (a.completedAt?.getTime?.() || a.createdAt?.getTime?.() || 0);
@@ -85,7 +92,7 @@ export default function FeedScreen({ navigation }) {
         .slice(0, SALES_COMPLETED_LIMIT)
         .map(q => q.id)
     );
-    visibleQueries = queries.filter(q =>
+    visibleQueries = godownScoped.filter(q =>
       !COMPLETED_STATUSES.includes(q.status) || recentCompletedIds.has(q.id)
     );
   }
@@ -134,6 +141,13 @@ export default function FeedScreen({ navigation }) {
           <Text style={styles.headerSubtitle}>Hi, {userName || 'User'}</Text>
         </View>
         <View style={styles.headerActions}>
+          <GodownFilterChip compact />
+          <TouchableOpacity
+            style={styles.logoutBtn}
+            onPress={() => navigation.navigate('Responsibilities')}
+          >
+            <Text style={styles.logoutIcon}>📋</Text>
+          </TouchableOpacity>
           <NotificationBell />
           <ExportButton onExport={handleExport} label="Export" />
           <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout}>

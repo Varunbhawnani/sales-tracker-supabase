@@ -1,12 +1,13 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  View, Text, ScrollView, StyleSheet,
+  View, Text, ScrollView, StyleSheet, AppState,
 } from 'react-native';
 import { COLORS, TIME_PERIODS, STATUS, LEGACY_STATUS, SAFE_TOP } from '../utils/constants';
 import { useAuth } from '../contexts/AuthContext';
 import { getMyStats } from '../services/statsService';
 import { getQueriesByUser } from '../services/queryService';
-import { formatSets, formatPercentage } from '../utils/formatUtils';
+import { subscribeToTable } from '../lib/supabase';
+import { formatPercentage } from '../utils/formatUtils';
 import { formatDateOnly } from '../utils/timeUtils';
 import FilterTabs from '../components/FilterTabs';
 import StatCard from '../components/StatCard';
@@ -34,9 +35,16 @@ export default function MyStatsScreen() {
   const [period, setPeriod] = useState(TIME_PERIODS.ALL_TIME);
   const [loading, setLoading] = useState(true);
 
-  const loadData = useCallback(async () => {
-    setLoading(true);
+  const inFlightRef = useRef(false);
+  const dirtyRef = useRef(false);
+
+  const loadData = useCallback(async ({ silent = false } = {}) => {
+    if (!userId) return;
+    if (inFlightRef.current) { dirtyRef.current = true; return; }
+    inFlightRef.current = true;
+    if (!silent) setLoading(true);
     try {
+      dirtyRef.current = false;
       const [statsData, queriesData] = await Promise.all([
         getMyStats(userId, period),
         getQueriesByUser(userId),
@@ -46,13 +54,26 @@ export default function MyStatsScreen() {
     } catch (error) {
       console.error('Error loading my stats:', error);
     } finally {
-      setLoading(false);
+      inFlightRef.current = false;
+      if (!silent) setLoading(false);
+      if (dirtyRef.current) loadData({ silent: true });
     }
   }, [userId, period]);
 
   useEffect(() => {
     if (userId) loadData();
   }, [loadData, userId]);
+
+  // Realtime refresh — mirror the leaderboard pattern so my-stats stays
+  // current after a mark-won / accounts-edit on another device.
+  useEffect(() => {
+    if (!userId) return undefined;
+    const channel = subscribeToTable('queries', '*', () => { loadData({ silent: true }); });
+    const appStateSub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') loadData({ silent: true });
+    });
+    return () => { channel.unsubscribe(); appStateSub?.remove(); };
+  }, [userId, loadData]);
 
   if (loading) return <LoadingState />;
 
@@ -104,7 +125,9 @@ export default function MyStatsScreen() {
               </View>
               <View style={styles.activityRight}>
                 {WON_STATUSES.includes(q.status) && (
-                  <Text style={styles.activitySets}>{q.requiredSets || 0} Sets</Text>
+                  <Text style={styles.activitySets}>
+                    {q.cartoons || 0}c · {q.lots || 0}l
+                  </Text>
                 )}
                 <StatusBadge status={q.status} />
               </View>

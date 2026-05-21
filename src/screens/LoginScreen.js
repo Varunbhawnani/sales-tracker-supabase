@@ -23,11 +23,29 @@ export default function LoginScreen() {
     setError('');
     setLoading(true);
 
+    // Hard-timeout race: in some networks the underlying fetch can wedge
+    // beyond Supabase's own internal handling and the spinner sits forever.
+    // Race the login against a 20s manual timeout so the button always
+    // reverts and the user can retry.
+    const HARD_TIMEOUT_MS = 20000;
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error('Network is too slow — please check your connection and try again.')),
+        HARD_TIMEOUT_MS,
+      );
+    });
+
     try {
-      await login(username.trim(), password);
+      await Promise.race([
+        login(username.trim(), password),
+        timeout,
+      ]);
     } catch (err) {
       console.log('Login error:', err.code, err.message);
-      if (err.message?.includes('pending Admin approval')) {
+      if (err.message?.includes('Network is too slow')) {
+        setError(err.message);
+      } else if (err.message?.includes('pending Admin approval')) {
         setError(err.message);
       } else if (err.message?.includes('deactivated')) {
         setError(err.message);
@@ -35,6 +53,7 @@ export default function LoginScreen() {
         setError('Invalid username or password.');
       }
     } finally {
+      clearTimeout(timer);
       setLoading(false);
     }
   };
@@ -116,7 +135,7 @@ export default function LoginScreen() {
           </TouchableOpacity>
         </View>
 
-        <Text style={styles.footer}>1 Set = 8 Pairs</Text>
+        <Text style={styles.footer}>Cartoons & Lots tracking</Text>
       </View>
     </KeyboardAvoidingView>
   );

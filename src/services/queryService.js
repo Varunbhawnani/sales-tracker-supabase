@@ -34,6 +34,9 @@ function rowToQuery(row) {
     customerMasterId: row.customer_master_id,
     customerName: row.customer_name,
     customerCategory: row.customer_category,
+    // Godown the query was tagged with at creation. NULL = visible to all
+    // (legacy queries pre-019 OR a salesperson with no godown assigned).
+    godownId: row.godown_id || null,
     items: row.items || [],
     requiredSets: row.required_sets,
     projectedRevenue: Number(row.projected_revenue || 0),
@@ -51,6 +54,8 @@ function rowToQuery(row) {
     claimedBy: row.claimed_by_user_id ? { userId: row.claimed_by_user_id, name: row.claimed_by_name } : null,
     claimedAt: row.claimed_at ? new Date(row.claimed_at) : null,
     snoozedAt: row.snoozed_at ? new Date(row.snoozed_at) : null,
+    // Optional follow-up date — set from mark_won or snooze_query. Backed by
+    // the new column added in migration 018; older rows have it as null.
     followUpDate: row.follow_up_date ? new Date(row.follow_up_date) : null,
     snoozeHistory: rawSnoozeHist.map(h => ({
       snoozedAt: h.snoozed_at ? new Date(h.snoozed_at) : null,
@@ -139,10 +144,18 @@ export function subscribeToQueries(callback, errorCallback) {
       if (error) {
         console.error('Error loading queries:', error);
         if (errorCallback) errorCallback(error);
+        // Important: always invoke callback so screens that flip loading
+        // state inside the callback don't sit on a spinner forever when the
+        // network fails. Subsequent retries (Realtime / AppState) repopulate.
+        callback(cache.length ? cache : []);
         return;
       }
       cache = data.map(rowToQuery);
       callback(cache);
+    } catch (e) {
+      console.error('subscribeToQueries threw:', e?.message || e);
+      if (errorCallback) errorCallback(e);
+      callback(cache.length ? cache : []);
     } finally {
       inFlight = false;
       if (dirty) initial();
@@ -195,10 +208,15 @@ export function subscribeToQueriesByStatuses(statuses, callback, errorCallback) 
       if (error) {
         console.error('Error loading filtered queries:', error);
         if (errorCallback) errorCallback(error);
+        callback(cache.length ? cache : []);
         return;
       }
       cache = data.map(rowToQuery);
       callback(cache);
+    } catch (e) {
+      console.error('subscribeToQueriesByStatuses threw:', e?.message || e);
+      if (errorCallback) errorCallback(e);
+      callback(cache.length ? cache : []);
     } finally {
       inFlight = false;
       if (dirty) initial();
@@ -254,9 +272,14 @@ export function subscribeToFollowUps(callback, errorCallback) {
       if (error) {
         console.error('Error loading follow-ups:', error);
         if (errorCallback) errorCallback(error);
+        callback([]);
         return;
       }
       callback(data.map(rowToQuery));
+    } catch (e) {
+      console.error('subscribeToFollowUps threw:', e?.message || e);
+      if (errorCallback) errorCallback(e);
+      callback([]);
     } finally {
       inFlight = false;
       if (dirty) initial();
@@ -346,9 +369,12 @@ export async function createQuery({
   notes,
   userId,
   userName,
+  godownId,
 }) {
   // Note: cartoons/lots quantities are entered at Mark Booked time (not here).
   // Products in a query are optional — a query may just be "send photos of X".
+  // godownId scopes who sees this query; NULL = visible to everyone (the user
+  // either had no godown assigned, or explicitly chose 'None' on the picker).
   const { data, error } = await supabase
     .from('queries')
     .insert({
@@ -363,6 +389,7 @@ export async function createQuery({
       status: STATUS.OPEN_QUERY,
       created_by_user_id: userId,
       created_by_name: userName,
+      godown_id: godownId || null,
     })
     .select('id')
     .single();
@@ -425,20 +452,29 @@ export async function autoUnsnoozeExpired({ force = false } = {}) {
   return data || 0;
 }
 
-export async function markWon(queryId, cartoons, lots, followUpNote) {
+export async function markWon(queryId, cartoons, lots, followUpNote, followUpDate) {
   const { data, error } = await supabase.rpc('mark_won', {
     query_id: queryId,
     p_cartoons: Number(cartoons) || 0,
     p_lots: Number(lots) || 0,
     p_follow_up_note: (followUpNote || '').trim() || null,
+    // YYYY-MM-DD or null. Postgres DATE column accepts the ISO date string.
+    p_follow_up_date: followUpDate ? toISODate(followUpDate) : null,
   });
   if (error) throw new Error(error.message);
   if (!data.success) throw new Error(data.message);
   triggerLocalRefresh();
 }
 
-export async function resolveFollowUp(queryId) {
-  const { data, error } = await supabase.rpc('resolve_follow_up', { query_id: queryId });
+function toISODate(d) {
+  if (!d) return null;
+  if (typeof d === 'string') return d.slice(0, 10);
+  if (d instanceof Date) return d.toISOString().slice(0, 10);
+  return null;
+}
+
+export async function pickupFollowUp(queryId) {
+  const { data, error } = await supabase.rpc('pickup_follow_up', { query_id: queryId });
   if (error) throw new Error(error.message);
   if (!data.success) throw new Error(data.message);
   triggerLocalRefresh();
@@ -456,17 +492,6 @@ export async function markLostCancelled(queryId, reason) {
 export async function cancelVerificationFailed(queryId, reason) {
   const { data, error } = await supabase.rpc('cancel_verification_failed', {
     query_id: queryId, reason: reason || '',
-  });
-  if (error) throw new Error(error.message);
-  if (!data.success) throw new Error(data.message);
-  triggerLocalRefresh();
-}
-
-export async function submitInvoiceNumber(queryId, invoice) {
-  // Legacy single-invoice helper. Calls the old RPC which redirects to
-  // add_invoice_entry with full cartoons+lots from the query.
-  const { data, error } = await supabase.rpc('submit_invoice_number', {
-    query_id: queryId, invoice: invoice,
   });
   if (error) throw new Error(error.message);
   if (!data.success) throw new Error(data.message);
@@ -510,12 +535,6 @@ export async function adminResetInvoiceAttempts(queryId) {
   if (error) throw new Error(error.message);
   if (!data.success) throw new Error(data.message);
   triggerLocalRefresh();
-}
-
-export async function updateDispatchedSets(queryId, setsShipped, operatorName) {
-  // Legacy path — old code may still call this. Forwards to mark_dispatched
-  // since dispatch is now a single toggle.
-  return markDispatched(queryId);
 }
 
 export async function markPacked(queryId) {

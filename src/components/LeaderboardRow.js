@@ -1,14 +1,14 @@
 import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { COLORS } from '../utils/constants';
-import { formatSets, formatPercentage } from '../utils/formatUtils';
-
-
+import { formatPercentage } from '../utils/formatUtils';
 
 export default function LeaderboardRow({ item, isCurrentUser }) {
   const successRate = item.totalClaimed > 0
     ? formatPercentage(item.totalSuccessful, item.totalClaimed)
     : '0.0%';
+  const cartoons = item.totalCartoons || 0;
+  const lots = item.totalLots || 0;
 
   return (
     <View style={[styles.row, isCurrentUser && styles.highlighted]}>
@@ -23,10 +23,6 @@ export default function LeaderboardRow({ item, isCurrentUser }) {
         </Text>
         <View style={styles.statsRow}>
           <Text style={styles.stat}>
-            <Text style={styles.statValue}>{formatSets(item.totalSetsSold)}</Text> Sets
-          </Text>
-          <Text style={styles.dot}>•</Text>
-          <Text style={styles.stat}>
             <Text style={styles.statValue}>{item.totalSuccessful || 0}</Text> Won
           </Text>
           <Text style={styles.dot}>•</Text>
@@ -36,9 +32,9 @@ export default function LeaderboardRow({ item, isCurrentUser }) {
 
       <View style={styles.setsContainer}>
         <Text style={[styles.setsValue, isCurrentUser && styles.highlightedText]}>
-          {formatSets(item.totalSetsSold)}
+          {cartoons}c
         </Text>
-        <Text style={styles.setsLabel}>Sets</Text>
+        <Text style={styles.setsValueSmall}>{lots}l</Text>
       </View>
     </View>
   );
@@ -121,6 +117,12 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontFamily: 'Inter_700Bold',
     color: COLORS.primary,
+  },
+  setsValueSmall: {
+    fontSize: 13,
+    fontFamily: 'Inter_600SemiBold',
+    color: COLORS.textSecondary,
+    marginTop: 2,
   },
   setsLabel: {
     fontSize: 10,
