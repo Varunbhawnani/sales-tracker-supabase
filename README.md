@@ -1,10 +1,10 @@
 # Sales Tracker — Supabase Edition
 
-A complete sales-tracking ERP for a shoe distribution business. Salespersons log customer queries, claim them, mark them won/lost. Accounts verifies invoices against Tally Prime. Dispatch logs shipments. Owner sees everything.
+A complete sales-tracking ERP for a shoe distribution business. Salespersons log customer queries (online/offline), claim them, mark them booked/lost. Accounts verifies invoices against Tally Prime — supporting **multi-invoice queries**. **Packing team** packs the order. **Dispatch** ships it. Owner sees everything. Roles can assign **tasks** to each other; **follow-ups** roll up across the team.
 
 Runs as a **mobile app (Android, iOS) and a web app** from one codebase (React Native + Expo). Data lives in **Supabase (PostgreSQL)**. Tally Prime integration happens through two small Node.js scripts running on the Windows machine where Tally is installed.
 
-This is the **Supabase port** of an older Firebase version. The business logic, screens, and Tally bridge are identical to the Firebase original — only the backend database, auth, and security rules were swapped.
+This is the **Supabase port** of an older Firebase version, extended through Segments A–J with: cartoons/lots as the unit model, follow-ups, multi-invoice verification with a 3-try lock, a Packing portal with 3-min undo, 15-day visibility cutoff, and a 2-way task assignment system. See [Segments A–J overview](#segments-aj--what-was-added-on-top-of-the-firebase-original).
 
 ---
 
@@ -15,8 +15,9 @@ This is the **Supabase port** of an older Firebase version. The business logic, 
 3. [File layout](#3-file-layout)
 4. [Tech stack](#4-tech-stack)
 5. [Database design](#5-database-design)
-6. [The 10-state workflow](#6-the-10-state-workflow)
-7. [Caching & delta-sync (how the app stays fast)](#7-caching--delta-sync-how-the-app-stays-fast)
+6. [The state workflow](#6-the-state-workflow)
+7. [Segments A–J — what was added on top of the Firebase original](#segments-aj--what-was-added-on-top-of-the-firebase-original)
+8. [Caching & delta-sync (how the app stays fast)](#7-caching--delta-sync-how-the-app-stays-fast)
 8. [Realtime updates — how the app stays in sync across devices](#8-realtime-updates--how-the-app-stays-in-sync-across-devices)
 9. [In-app notifications (the bell)](#9-in-app-notifications-the-bell)
 10. [Safeguards: 5-try invoice lock, party-name cross-check, duplicate-invoice dedup](#10-safeguards-5-try-invoice-lock-party-name-cross-check-duplicate-invoice-dedup)
@@ -33,18 +34,22 @@ This is the **Supabase port** of an older Firebase version. The business logic, 
 
 ## 1. What the system does
 
-A salesperson is in front of a customer. The customer says they want 50 sets of shoes. The salesperson:
+A salesperson is in front of a customer (or on a call). The customer says they want 50 cartoons and 5 lots of shoes. The salesperson:
 
-1. Opens the app, picks the customer from a dropdown (data flowing from Tally Sundry Debtors).
-2. Picks products + quantity.
-3. Submits — the query lands in the Feed for everyone to see.
-4. Same salesperson (or another) claims it. They negotiate. If won, they mark it **Won**.
-5. The accounts team (a different role) sees the won query, types in the Tally invoice number once the actual invoice is cut.
-6. The system auto-verifies the invoice against Tally within seconds. Cross-checks that the invoice's party matches the query's customer.
-7. Dispatch sees the verified query, logs shipments as they go out — partial or full.
-8. Owner sees the entire pipeline at a glance: who claimed what, who's stuck, who's winning, who's losing.
+1. Opens the app, picks **Online or Offline** as the query's origin.
+2. Picks the customer from a dropdown (data flowing from Tally Sundry Debtors).
+3. Types a mandatory note about what the customer asked for. Optionally tags products.
+4. Submits — the query lands in the Feed for everyone to see.
+5. Same salesperson (or another) claims it. They negotiate. If booked, they tap **Mark Booked** and enter **cartoons + lots** (two separate quantities) — and optionally an open follow-up note.
+6. Accounts sees the booked query, enters **one or more Tally invoice numbers** (a single query can have many invoice entries). They also enter cartoons/lots per invoice; they can edit cartoons/lots inline as the order shape firms up.
+7. The system auto-verifies each invoice against Tally within seconds. Cross-checks party name. Rejects duplicates across queries. After **3 failed attempts on a single entry**, accounts is locked out — owner has to unlock or flag back to sales.
+8. Once every invoice entry is verified and their cartoons + lots cover the query total, the query moves to the **Packing** portal. Packing toggles **Packed** when done. Within 3 minutes they can undo; after that it's locked.
+9. **Dispatch** sees the packed query, toggles **Dispatched** when it leaves the warehouse. Same 3-minute undo, same lock.
+10. Salespersons get a cross-cutting **Follow-Ups** tab covering any unresolved follow-up (whether from a Mark Booked note, a Snooze, or otherwise). They mark each follow-up resolved as they handle it.
+11. Anyone can be **assigned tasks** by anyone else (admin ↔ all roles). The Tasks tab shows Inbox / Sent. Toggle complete when done.
+12. Owner sees the entire pipeline at a glance: open, accounts, packing, dispatch, completed, lost — plus packing team throughput.
 
-The whole flow is visible to the owner. Each step is gated by role (salesperson can't act as accounts, etc.) via Row-Level Security in Postgres.
+The whole flow is visible to the owner. Each step is gated by role (salesperson can't act as accounts, etc.) via Row-Level Security in Postgres. To keep the Feed focused, **queries older than 15 days drop out** of every list (except the Follow-Ups tab, which always shows anything unresolved).
 
 ---
 
@@ -137,7 +142,14 @@ sales-tracker-supabase/
 │   │   ├── 006_invoice_attempt_lock.sql    (5-try lock on invoice verification + admin-reset RPC)
 │   │   ├── 007_fix_dispatch_cast.sql       (enum cast fix in update_dispatched_sets)
 │   │   ├── 008_enable_realtime.sql         (adds every table to supabase_realtime publication)
-│   │   └── 009_notifications.sql           (notifications table + trigger + bell-style RLS)
+│   │   ├── 009_notifications.sql           (notifications table + trigger + bell-style RLS)
+│   │   ├── 010_admin_can_claim.sql         (owner can claim queries directly)
+│   │   ├── 011_query_origin.sql            (Online/Offline origin column on queries)
+│   │   ├── 012_cartoons_lots_followups.sql (cartoons + lots columns; follow_up_* fields; rewrites mark_won / snooze_query / mark_lost_cancelled / adds resolve_follow_up)
+│   │   ├── 013_multi_invoice.sql           (invoice_entries JSONB + add_invoice_entry + accounts_update_quantity; 3-try lock; per-entry verification & duplicate rejection)
+│   │   ├── 014_packing_flow.sql            (packing role; is_packed flag; mark_packed / undo_packed / mark_dispatched / undo_dispatched RPCs)
+│   │   ├── 015_tasks.sql                   (tasks table, RLS, create_task / toggle_task RPCs, notification trigger)
+│   │   └── 016_fix_markwon_ambiguity.sql   (renames mark_won parameter to p_follow_up_note to disambiguate from queries.follow_up_note column)
 │   ├── seed.sql                  ← optional starter data
 │   └── README.md                 ← what each migration does
 │
@@ -149,25 +161,29 @@ sales-tracker-supabase/
 │   ├── navigation/
 │   │   └── AppNavigator.js       ← top-bar + sidebar (web), bottom tabs (native)
 │   ├── services/
-│   │   ├── queryService.js       ← query CRUD + RPC calls (state machine, debounced realtime, AppState refresh, local event bus)
+│   │   ├── queryService.js       ← query CRUD + RPC calls (state machine, debounced realtime, AppState refresh, local event bus, 15-day cutoff, multi-invoice helpers, mark/undo packed/dispatched)
 │   │   ├── authService.js        ← user CRUD via admin_create_user RPC
 │   │   ├── masterDataService.js  ← cached customer/product list + delta sync
-│   │   ├── statsService.js       ← leaderboard data
+│   │   ├── statsService.js       ← recomputes on-the-fly from queries.cartoons + queries.lots; week/month/year/all-time
+│   │   ├── tasksService.js       ← (new) subscribeToMyTasks / createTask / toggleTask
 │   │   ├── settingsService.js
 │   │   ├── exportService.js + exportShare.{native,web}.js
 │   │   ├── notificationService.js  ← Expo push tokens (mobile only — not currently used)
 │   │   └── notificationsService.js ← in-app bell notifications (the bell icon you see in headers)
-│   ├── screens/                  ← all 10 screens
+│   ├── screens/
 │   │   ├── LoginScreen.js
 │   │   ├── FeedScreen.js
-│   │   ├── NewQueryScreen.js
-│   │   ├── QueryDetailScreen.js
-│   │   ├── AccountsDashboardScreen.js
-│   │   ├── DispatchDashboardScreen.js
-│   │   ├── OwnerDashboardScreen.js
-│   │   ├── AdminScreen.js
-│   │   ├── LeaderboardScreen.js
-│   │   └── MyStatsScreen.js
+│   │   ├── NewQueryScreen.js               ← Online/Offline pills → customer → mandatory notes → optional products
+│   │   ├── QueryDetailScreen.js            ← Mark Booked / Snooze / Lost sheets; cartoons + lots; follow-up note
+│   │   ├── AccountsDashboardScreen.js      ← multi-invoice entries, per-entry verified/failed badges, edit cartoons/lots inline, 3-try lock UI
+│   │   ├── PackingDashboardScreen.js       ← (new) toggle to mark packed; 3-min undo countdown then lock
+│   │   ├── DispatchDashboardScreen.js      ← (rewritten) toggle to mark dispatched; 3-min undo then lock
+│   │   ├── FollowUpsScreen.js              ← (new) cross-portal feed of unresolved follow-ups (filter by booked/snoozed)
+│   │   ├── TasksScreen.js                  ← (new) Inbox / Sent tabs; new-task sheet; toggle complete
+│   │   ├── OwnerDashboardScreen.js         ← Pipeline incl. Packing; Packing-team throughput card; 5-fail lock unlock/flag-back
+│   │   ├── AdminScreen.js                  ← includes Packing role
+│   │   ├── LeaderboardScreen.js            ← Week / Month / Year / All-Time tabs; cartoons + lots
+│   │   └── MyStatsScreen.js                ← Week / Month / Year / All-Time tabs; cartoons + lots
 │   ├── components/               ← BottomSheet, StatusBadge, ProductSelector, NotificationBell, etc.
 │   └── utils/                    ← constants, formatUtils, timeUtils
 │
@@ -205,10 +221,10 @@ sales-tracker-supabase/
 
 ## 5. Database design
 
-Six tables. All snake_case in DB; the service layer maps to camelCase before screens see it.
+Tables — all snake_case in DB; the service layer maps to camelCase before screens see it.
 
 ### `users`
-One row per human who can log in. References `auth.users.id`. Holds name, username, email, role, is_active, expo_push_token, gamification.
+One row per human who can log in. References `auth.users.id`. Holds name, username, email, **role** (one of `owner`, `salesperson`, `accounts`, `packing`, `dispatch`), is_active, expo_push_token, gamification.
 
 ### `customers_master`
 Mirror of Tally's Sundry Debtors. Keyed by GUID (Tally's stable identifier). Includes `tally_alter_id` (delta watermark), `category` (A/B/C/D customer grade), `price_level` (which price tier this customer gets), `last_synced` (read-side delta watermark).
@@ -217,7 +233,10 @@ Mirror of Tally's Sundry Debtors. Keyed by GUID (Tally's stable identifier). Inc
 Mirror of Tally's Stock Items. Keyed by GUID. Holds `price` and a JSONB `price_tiers` like `{OS: 231, OS1: 245, FO: 220}` — picked based on the customer's `price_level`.
 
 ### `queries`
-The core table. One row per customer query. Columns track every state-machine field: who created it, who claimed it, what items, dispatched count, dispatch history (JSONB array), snooze history (JSONB array), invoice number, verification timestamps, gamification timings.
+The core table. One row per customer query. Columns track every state-machine field: who created it, who claimed it, what items, **origin** (`online`/`offline`), **cartoons + lots** (two quantities — not a single sets count), `last_activity_at` (drives the 15-day visibility cutoff), `invoice_entries` JSONB (an array of `{invoice_no, party_name, cartoons, lots, status, attempt_count, verified_at, failed_reason}` — one per accounts entry), `invoice_attempt_count` (3-try lock per entry), `is_packed` + `packed_at` + `packed_by`, `dispatched_at` + `dispatched_by`, follow-up fields (`follow_up_note`, `follow_up_origin` = `booked`/`snoozed`, `follow_up_resolved`), snooze history (JSONB array), gamification timings.
+
+### `tasks`
+One row per assigned task. Columns: `from_user`, `to_user`, `title`, `note`, `is_done`, `done_at`. RLS scoped so each user only sees tasks they sent or received.
 
 ### `salesperson_stats`
 One row per salesperson. Cached counters: `total_claimed`, `total_successful`, `total_unsuccessful`, `total_sets_sold`. Updated atomically inside the RPC functions, never directly writable from the client.
@@ -232,7 +251,7 @@ Single row (`id = 'app'`). Holds the configurable thresholds: gone-quiet days, S
 
 ---
 
-## 6. The 10-state workflow
+## 6. The state workflow
 
 ```
 open_query
@@ -244,32 +263,64 @@ claimed_by_sales ──snooze_query()──► snoozed ──unsnooze_query()─
     ▼                                    ▼
 lost_cancelled                       lost_cancelled
     │
-mark_won()
+mark_won(cartoons, lots, follow_up_note?)
     ▼
-won_pending_accounts ──submit_invoice_number()──► pending_verification
-                                                      │
-                              (Tally bridge auto-checks invoice + party)
-                                  /                        \
-                            verified                      invoice not found
-                                /                          OR party mismatch
-                                ▼                            ▼
-              verified_pending_dispatch              verification_failed ──flag_back_to_sales()──► won_pending_accounts
-                          │                                  │ cancel_verification_failed()
-                          │ update_dispatched_sets() (partial)  ▼
-                          ▼                              lost_cancelled
-              partially_dispatched
-                          │ update_dispatched_sets() (last)
-                          ▼
-                      completed
+won_pending_accounts ──add_invoice_entry()──► pending_verification
+   ▲                  (one or more entries; each verified independently)
+   │
+   │   (Tally bridge auto-checks every pending entry)
+   │
+   │ accounts can also accounts_update_quantity() to edit cartoons/lots
+   │
+   │ All entries verified AND sum(entries.cartoons+lots) ≥ query.cartoons+lots:
+   ▼
+verified_pending_dispatch  (is_packed = false)
+    │ mark_packed() / undo_packed() within 3 minutes
+    ▼
+verified_pending_dispatch  (is_packed = true → "ready to ship")
+    │ mark_dispatched() / undo_dispatched() within 3 minutes
+    ▼
+partially_dispatched  ──or──►  completed
+
+verification_failed  (per-entry attempt fails — 3-try lock per entry)
+    └─flag_back_to_sales()──► won_pending_accounts  (admin)
+    └─cancel_verification_failed()──► lost_cancelled
 ```
 
-Every transition runs server-side as a stored PostgreSQL function (`claim_query`, `mark_won`, `submit_invoice_number`, etc.). The function:
+Key transition functions: `claim_query`, `mark_won`, `snooze_query`, `mark_lost_cancelled`, `add_invoice_entry`, `accounts_update_quantity`, `mark_packed`, `undo_packed`, `mark_dispatched`, `undo_dispatched`, `resolve_follow_up`, `create_task`, `toggle_task`, `admin_reset_invoice_attempts`, `flag_back_to_sales`. Each:
+
 1. Locks the row (`SELECT ... FOR UPDATE`).
 2. Verifies the actor is allowed to make this transition (claimer-only checks, role checks).
-3. Confirms `is_valid_transition(current, target)` returns true.
-4. Updates the row, updates `salesperson_stats` counters, returns `{success, message}` JSON.
+3. Confirms `is_valid_transition(current, target)` returns true (where applicable).
+4. Updates the row + `salesperson_stats` counters (where applicable), returns `{success, message}` JSON.
+5. Bumps `last_activity_at` to `NOW()` — this is what the 15-day visibility cutoff watches.
 
 A malicious client can't skip steps because the only way to change state is via these functions.
+
+**Packing is a flag, not a status.** A query stays at `verified_pending_dispatch` while it moves through packing → dispatch; the `is_packed` flag advances the visual pipeline indicator between "Verified" and "Shipped".
+
+---
+
+## Segments A–J — what was added on top of the Firebase original
+
+The system was extended from the original Firebase build through ten focused segments. They're individually small but interdependent (e.g. multi-invoice verification assumes the cartoons/lots model). For day-to-day operation you don't need to know which segment a feature came from — they're documented here for future archaeology.
+
+| Seg | What changed | Lives in |
+|---|---|---|
+| **A** | Notification bell multi-route navigation fallback; admin can claim queries; cartoons/lots terminology foundation | `NotificationBell.js`, migration 010 |
+| **B** | New Query rewritten: Online/Offline origin pills, mandatory Notes, optional Products at bottom, no price/revenue UI | `NewQueryScreen.js`, `ProductSelector.js`, migration 011 |
+| **C** | Cartoons + lots as two separate quantities; follow-up note + origin (booked/snoozed); action sheets ask for required fields | migration 012, `QueryDetailScreen.js` |
+| **D** | Follow-Ups cross-portal tab — every unresolved follow-up regardless of state; resolved separately | `FollowUpsScreen.js`, `queryService.subscribeToFollowUps` |
+| **E** | Multi-invoice verification: each entry has its own attempt counter, party-name & duplicate checks, status; accounts can edit cartoons/lots inline | migration 013, `AccountsDashboardScreen.js`, `tally-bridge.js` (multi-entry processing — see Tally section below) |
+| **F** | Packing role + portal between Accounts and Dispatch; `is_packed` boolean (not a new status) | migration 014, `PackingDashboardScreen.js` |
+| **G** | Dispatch + Packing toggle UX with 3-minute undo window then lock | `mark_packed`/`undo_packed`/`mark_dispatched`/`undo_dispatched` RPCs |
+| **H** | 15-day visibility cutoff via `last_activity_at` — applied to every list except Follow-Ups | `queryService.visibilityCutoffISO()` |
+| **I** | 2-way task assignment (admin ↔ all roles) with notification on assign | migration 015, `TasksScreen.js`, `tasksService.js` |
+| **J** | Stats recompute on-the-fly from `queries.cartoons` + `queries.lots`; Week/Month/Year/All-Time tabs everywhere | `statsService.js`, `LeaderboardScreen.js`, `MyStatsScreen.js` |
+
+**Critical Tally bridge change (Segment E):** `tally/tally-bridge.js` was rewritten to process each entry in `queries.invoice_entries` independently and roll up to the query's overall state at the end. Each entry has its own 3-try counter; the query only moves to `verified_pending_dispatch` once **every** entry verifies AND the sum of entries' cartoons + lots covers the query's total. **`tally/tally-sync.js` was not touched.**
+
+**Hot-fix:** migration 016 renames `mark_won`'s `follow_up_note` parameter to `p_follow_up_note` — the original name collided with the `queries.follow_up_note` column and produced the error *"column reference 'follow_up_note' is ambiguous"*.
 
 ---
 
@@ -302,14 +353,26 @@ The Feed and the New Query dropdown can't wait 3 seconds to load the customer / 
 2. Name: `sales-tracker`, region: `Mumbai (ap-south-1)`, strong DB password.
 3. Wait ~2 minutes for provisioning.
 
-### 8.2. Apply the four SQL migrations in order
+### 8.2. Apply the SQL migrations in order
 
 In Supabase Dashboard → **SQL Editor → New query**, paste-and-run each of these in order:
 
-1. `supabase/migrations/001_initial_schema.sql` (tables, enums, indexes)
-2. `supabase/migrations/002_rls_policies.sql` (Row-Level Security)
-3. `supabase/migrations/003_functions_and_triggers.sql` (atomic RPCs)
-4. `supabase/migrations/004_invoice_dedup.sql` (partial unique index)
+1. `001_initial_schema.sql` (tables, enums, indexes)
+2. `002_rls_policies.sql` (Row-Level Security)
+3. `003_functions_and_triggers.sql` (atomic RPCs)
+4. `004_invoice_dedup.sql` (partial unique index)
+5. `005_admin_create_user.sql`
+6. `006_invoice_attempt_lock.sql`
+7. `007_fix_dispatch_cast.sql`
+8. `008_enable_realtime.sql`
+9. `009_notifications.sql`
+10. `010_admin_can_claim.sql`
+11. `011_query_origin.sql`
+12. `012_cartoons_lots_followups.sql`
+13. `013_multi_invoice.sql`
+14. `014_packing_flow.sql`
+15. `015_tasks.sql`
+16. `016_fix_markwon_ambiguity.sql`
 
 Each should print "Success. No rows returned."
 
@@ -385,6 +448,7 @@ You should see startup banners showing the Tally company and lookback window. Wi
 Owner → Admin tab → **+ Add User** for each:
 - Salespersons (role: Salesperson)
 - Accounts staff (role: Accounts)
+- Packing staff (role: Packing)
 - Dispatch staff (role: Dispatch)
 
 Hand them their credentials privately.
@@ -599,11 +663,15 @@ If something's broken, these are the files to check first:
 | Login | `src/contexts/AuthContext.js` |
 | Feed not loading | `src/services/queryService.js` (subscribeToQueries) |
 | Customer dropdown empty | `src/services/masterDataService.js` |
-| State transition not working | `supabase/migrations/003_functions_and_triggers.sql` |
-| RLS rejecting a write | `supabase/migrations/002_rls_policies.sql` |
-| Tally invoice verification | `tally/tally-bridge.js` |
-| Tally master-data sync | `tally/tally-sync.js` |
-| Time period filters / leaderboard | `src/services/statsService.js` + `src/utils/timeUtils.js` |
+| State transition not working | `supabase/migrations/003_functions_and_triggers.sql` + the segment-specific migrations (012–016) |
+| RLS rejecting a write | `supabase/migrations/002_rls_policies.sql` (+ 014 for packing, 015 for tasks) |
+| Multi-invoice entry / 3-try lock | `supabase/migrations/013_multi_invoice.sql` + `AccountsDashboardScreen.js` |
+| Packed/Dispatched toggle | `supabase/migrations/014_packing_flow.sql` + `PackingDashboardScreen.js` / `DispatchDashboardScreen.js` |
+| Follow-ups not appearing | `FollowUpsScreen.js` + `queryService.subscribeToFollowUps` |
+| Tasks not delivered | `supabase/migrations/015_tasks.sql` + `tasksService.js` |
+| Stats off / period tabs | `src/services/statsService.js` + `src/utils/timeUtils.js` |
+| Tally invoice verification | `tally/tally-bridge.js` (multi-entry rewrite per Segment E) |
+| Tally master-data sync | `tally/tally-sync.js` (unchanged) |
 | Excel export | `src/services/exportService.js` + `exportShare.{native,web}.js` |
 
 ---

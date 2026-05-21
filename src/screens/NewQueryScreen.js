@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useLayoutEffect } from 'react';
+import React, { useState, useEffect, useLayoutEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, ScrollView,
   StyleSheet, Alert, ActivityIndicator, KeyboardAvoidingView, Platform,
@@ -19,23 +19,26 @@ import TierBadge from '../components/TierBadge';
 import ProductSelector from '../components/ProductSelector';
 import Toast from 'react-native-toast-message';
 
-const FALLBACK_KEYBOARD_HEIGHT = 340;
-
 export default function NewQueryScreen({ navigation, route }) {
   const { userId, userName } = useAuth();
   const prefilledCustomer = route?.params?.customer || null;
 
-  const scrollViewRef = useRef(null);
-
+  // Form state. Order on screen (top → bottom):
+  //   1. Origin: Online / Offline (required)
+  //   2. Customer (required)
+  //   3. Notes (required — replaces the old "details" field)
+  //   4. Products (OPTIONAL — just tags, no quantities or prices)
+  // Cartoons + lots quantities are NOT entered here. They're set at Mark
+  // Booked time by the salesperson/admin who closes the deal.
+  const [origin, setOrigin] = useState(null);              // 'online' | 'offline'
   const [customers, setCustomers] = useState([]);
   const [products, setProducts] = useState([]);
   const [selectedCustomer, setSelectedCustomer] = useState(prefilledCustomer);
-  const [items, setItems] = useState([]);
   const [notes, setNotes] = useState('');
+  const [items, setItems] = useState([]);
   const [submitting, setSubmitting] = useState(false);
   const [loadingData, setLoadingData] = useState(true);
   const [backgroundLoading, setBackgroundLoading] = useState(false);
-  const [keyboardHeight, setKeyboardHeight] = useState(0);
 
   useLayoutEffect(() => {
     navigation.setOptions({
@@ -52,18 +55,7 @@ export default function NewQueryScreen({ navigation, route }) {
   }, [navigation]);
 
   useEffect(() => {
-    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
-    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
-    const showSub = Keyboard.addListener(showEvent, (e) => {
-      setKeyboardHeight(e.endCoordinates?.height || FALLBACK_KEYBOARD_HEIGHT);
-    });
-    const hideSub = Keyboard.addListener(hideEvent, () => setKeyboardHeight(0));
-    return () => { showSub.remove(); hideSub.remove(); };
-  }, []);
-
-  useEffect(() => {
     let cancelled = false;
-
     (async () => {
       const [cachedCustomers, cachedProducts] = await Promise.all([
         getCachedCustomers(),
@@ -85,50 +77,38 @@ export default function NewQueryScreen({ navigation, route }) {
             if (!cancelled) setProducts(batch);
           }),
         ]);
-      } catch (e) {
-        // network failure → cache fallback
-      } finally {
-        if (!cancelled) {
-          setLoadingData(false);
-          setBackgroundLoading(false);
-        }
+      } catch (e) { /* cached fallback already shown */ }
+      finally {
+        if (!cancelled) { setLoadingData(false); setBackgroundLoading(false); }
       }
     })();
-
     return () => { cancelled = true; };
   }, []);
 
-  const totalSets = items.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
-  const totalRevenue = items.reduce((sum, item) => sum + (item.totalPrice || 0), 0);
-
-  // Wait for the keyboard to start animating in, then scroll the Notes field
-  // (which is the last element on the page) into view. KeyboardAvoidingView
-  // does the heavy lifting; we just need to nudge the ScrollView to the
-  // bottom so the input doesn't sit under the keyboard.
-  const handleNotesFocus = () => {
-    setTimeout(() => {
-      scrollViewRef.current?.scrollToEnd({ animated: true });
-    }, 250);
-  };
-
   const handleSubmit = async () => {
-    if (!selectedCustomer) { Alert.alert('Missing Field', 'Please select a customer.'); return; }
-    if (items.length === 0) { Alert.alert('Missing Field', 'Please add at least one product.'); return; }
+    if (!origin) {
+      Alert.alert('Missing Field', 'Please select Online or Offline.'); return;
+    }
+    if (!selectedCustomer) {
+      Alert.alert('Missing Field', 'Please select a customer.'); return;
+    }
+    if (!notes.trim()) {
+      Alert.alert('Missing Field', 'Notes are required — describe what the customer wants.'); return;
+    }
+    // Products are optional. If present, validate that each has a product picked.
     for (let i = 0; i < items.length; i++) {
-      if (!items[i].productId) { Alert.alert('Missing Field', `Please select a product for Item ${i + 1}.`); return; }
-      if (!items[i].quantity || Number(items[i].quantity) <= 0) {
-        Alert.alert('Missing Field', `Please enter a valid quantity for Item ${i + 1}.`); return;
+      if (!items[i].productId) {
+        Alert.alert('Missing Field', `Please pick a product for Item ${i + 1}, or remove it.`); return;
       }
     }
 
     setSubmitting(true);
     try {
+      // Strip out any quantity/price residue — these are entered at
+      // Mark Booked time, not here.
       const cleanItems = items.map(item => ({
         productId: item.productId,
         productName: item.productName,
-        quantity: Number(item.quantity),
-        unitPrice: item.unitPrice,
-        totalPrice: item.totalPrice,
       }));
 
       const queryId = await createQuery({
@@ -136,24 +116,20 @@ export default function NewQueryScreen({ navigation, route }) {
         customerName: selectedCustomer.name,
         customerCategory: selectedCustomer.category || 'D',
         items: cleanItems,
-        requiredSets: totalSets,
-        projectedRevenue: totalRevenue,
+        origin,
         notes: notes.trim(),
         userId,
         userName,
       });
 
-      // Fire-and-forget the push notification — don't block the UI on a
-      // slow / failing call to Expo's push API. If the notification fails
-      // the user has already created the query successfully.
-      sendNewQueryNotification(
-        selectedCustomer.name, totalSets, queryId, userId,
-      ).catch(err => console.warn('Push notification failed (non-fatal):', err?.message || err));
+      // Fire-and-forget the push notification (non-blocking).
+      sendNewQueryNotification(selectedCustomer.name, 0, queryId, userId)
+        .catch(err => console.warn('Push notification failed (non-fatal):', err?.message || err));
 
       Toast.show({
         type: 'success',
         text1: 'Query submitted',
-        text2: `${selectedCustomer.name} — ${totalSets} Sets`,
+        text2: `${selectedCustomer.name} (${origin})`,
         position: 'bottom',
       });
 
@@ -167,8 +143,6 @@ export default function NewQueryScreen({ navigation, route }) {
     }
   };
 
-  const dynamicPaddingBottom = keyboardHeight > 0 ? keyboardHeight + 240 : 40;
-
   return (
     <KeyboardAvoidingView
       style={styles.container}
@@ -176,14 +150,35 @@ export default function NewQueryScreen({ navigation, route }) {
       keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
     >
       <ScrollView
-        ref={scrollViewRef}
-        contentContainerStyle={[styles.content, { paddingBottom: dynamicPaddingBottom }]}
+        contentContainerStyle={[styles.content, { paddingBottom: 80 }]}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
       >
         <Text style={styles.screenTitle}>New Query</Text>
-        <Text style={styles.screenSubtitle}>Enter a customer query to track</Text>
+        <Text style={styles.screenSubtitle}>Record any customer enquiry — could be an order, a photo request, anything.</Text>
 
+        {/* ─── 1. Origin: Online vs Offline ─── */}
+        <View style={[styles.fieldGroup, { zIndex: 30 }]}>
+          <Text style={styles.label}>Origin *</Text>
+          <View style={styles.originRow}>
+            <TouchableOpacity
+              style={[styles.originBtn, origin === 'online' && styles.originBtnActive]}
+              onPress={() => setOrigin('online')}
+              activeOpacity={0.8}
+            >
+              <Text style={[styles.originText, origin === 'online' && styles.originTextActive]}>🌐 Online</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.originBtn, origin === 'offline' && styles.originBtnActive]}
+              onPress={() => setOrigin('offline')}
+              activeOpacity={0.8}
+            >
+              <Text style={[styles.originText, origin === 'offline' && styles.originTextActive]}>🏪 Offline</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        {/* ─── 2. Customer ─── */}
         <View style={[styles.fieldGroup, { zIndex: 20 }]}>
           <Text style={styles.label}>
             Customer *
@@ -208,39 +203,36 @@ export default function NewQueryScreen({ navigation, route }) {
             <View style={styles.selectedInfo}>
               <Text style={styles.selectedName}>{selectedCustomer.name}</Text>
               <TierBadge category={selectedCustomer.category} />
-              {selectedCustomer.priceLevel && (
-                <Text style={styles.priceLevelText}>
-                  Price: {selectedCustomer.priceLevel}
-                </Text>
-              )}
             </View>
           )}
         </View>
 
+        {/* ─── 3. Notes (required) ─── */}
+        <View style={styles.fieldGroup}>
+          <Text style={styles.label}>Notes *</Text>
+          <View style={[styles.inputContainer, styles.textAreaContainer]}>
+            <TextInput
+              style={[styles.input, styles.textArea]}
+              placeholder="Describe the customer's enquiry. E.g. wants photos of latest black formals, asking about bulk pricing on K401, etc."
+              placeholderTextColor={COLORS.textTertiary}
+              value={notes}
+              onChangeText={setNotes}
+              multiline
+              numberOfLines={5}
+              textAlignVertical="top"
+            />
+          </View>
+          <Text style={styles.helper}>Required — be specific so the team knows what's needed.</Text>
+        </View>
+
+        {/* ─── 4. Products (OPTIONAL) ─── */}
         <View style={[styles.fieldGroup, { zIndex: 10 }]}>
           <ProductSelector
             products={products}
             items={items}
             onItemsChange={setItems}
-            customerPriceLevel={selectedCustomer?.priceLevel}
+            optional
           />
-        </View>
-
-        <View style={styles.fieldGroup}>
-          <Text style={styles.label}>Notes (Optional)</Text>
-          <View style={[styles.inputContainer, styles.textAreaContainer]}>
-            <TextInput
-              style={[styles.input, styles.textArea]}
-              placeholder="Any additional details..."
-              placeholderTextColor={COLORS.textTertiary}
-              value={notes}
-              onChangeText={setNotes}
-              multiline
-              numberOfLines={4}
-              textAlignVertical="top"
-              onFocus={handleNotesFocus}
-            />
-          </View>
         </View>
 
         <TouchableOpacity
@@ -266,17 +258,27 @@ const styles = StyleSheet.create({
   headerBack: { paddingHorizontal: 12, paddingVertical: 6 },
   headerBackArrow: { fontSize: 24, color: COLORS.primary, fontFamily: 'Inter_500Medium' },
   screenTitle: { fontSize: 24, fontFamily: 'Inter_700Bold', color: COLORS.textPrimary, marginBottom: 4 },
-  screenSubtitle: { fontSize: 14, fontFamily: 'Inter_400Regular', color: COLORS.textSecondary, marginBottom: 28 },
+  screenSubtitle: { fontSize: 13, fontFamily: 'Inter_400Regular', color: COLORS.textSecondary, marginBottom: 28, lineHeight: 18 },
   fieldGroup: { marginBottom: 22 },
   label: { fontSize: 13, fontFamily: 'Inter_600SemiBold', color: COLORS.textSecondary, marginBottom: 8, marginLeft: 4 },
   loadingHint: { fontSize: 11, fontFamily: 'Inter_400Regular', color: COLORS.textTertiary },
+  helper: { fontSize: 11, fontFamily: 'Inter_400Regular', color: COLORS.textTertiary, marginTop: 6, marginLeft: 4 },
   inputContainer: { backgroundColor: COLORS.surface, borderRadius: 14, borderWidth: 1, borderColor: COLORS.border, paddingHorizontal: 14 },
   input: { paddingVertical: 14, fontSize: 15, fontFamily: 'Inter_400Regular', color: COLORS.textPrimary },
-  textAreaContainer: { minHeight: 100 },
-  textArea: { minHeight: 80 },
+  textAreaContainer: { minHeight: 120 },
+  textArea: { minHeight: 100 },
   selectedInfo: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 10, paddingHorizontal: 4 },
   selectedName: { fontSize: 14, fontFamily: 'Inter_600SemiBold', color: COLORS.primary, flex: 1 },
-  priceLevelText: { fontSize: 12, fontFamily: 'Inter_400Regular', color: COLORS.textTertiary },
+  // Origin pill row
+  originRow: { flexDirection: 'row', gap: 10 },
+  originBtn: {
+    flex: 1, paddingVertical: 14, paddingHorizontal: 16,
+    backgroundColor: COLORS.surface, borderRadius: 14,
+    borderWidth: 1, borderColor: COLORS.border, alignItems: 'center',
+  },
+  originBtnActive: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
+  originText: { fontSize: 14, fontFamily: 'Inter_600SemiBold', color: COLORS.textSecondary },
+  originTextActive: { color: COLORS.white },
   submitButton: {
     backgroundColor: COLORS.primary, borderRadius: 14, paddingVertical: 16, alignItems: 'center', marginTop: 8,
     shadowColor: COLORS.primary, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 4,

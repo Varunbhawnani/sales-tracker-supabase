@@ -38,6 +38,12 @@ function rowToQuery(row) {
     requiredSets: row.required_sets,
     projectedRevenue: Number(row.projected_revenue || 0),
     notes: row.notes || '',
+    origin: row.origin || null,
+    cartoons: row.cartoons || 0,
+    lots: row.lots || 0,
+    followUpNote: row.follow_up_note || null,
+    followUpOrigin: row.follow_up_origin || null,
+    followUpResolved: !!row.follow_up_resolved,
     status: row.status,
     createdBy: row.created_by_user_id ? { userId: row.created_by_user_id, name: row.created_by_name } : null,
     createdAt: row.created_at ? new Date(row.created_at) : null,
@@ -59,12 +65,28 @@ function rowToQuery(row) {
     authFailureCount: row.auth_failure_count || 0,
     lastAuthFailureAt: row.last_auth_failure_at ? new Date(row.last_auth_failure_at) : null,
     invoiceAttemptCount: row.invoice_attempt_count || 0,
+    invoiceEntries: (row.invoice_entries || []).map(e => ({
+      invoiceNo: e.invoice_no,
+      cartoons: e.cartoons || 0,
+      lots: e.lots || 0,
+      status: e.status,
+      addedAt: e.added_at ? new Date(e.added_at) : null,
+      verifiedAt: e.verified_at ? new Date(e.verified_at) : null,
+      verificationError: e.verification_error || null,
+    })),
     dispatchedSets: row.dispatched_sets || 0,
     dispatchHistory: rawDispHist.map(h => ({
       date: h.date ? new Date(h.date) : null,
       setsShipped: h.sets_shipped || 0,
       operator: h.operator || 'Unknown',
     })),
+    isPacked: !!row.is_packed,
+    packedAt: row.packed_at ? new Date(row.packed_at) : null,
+    packedByName: row.packed_by_name || null,
+    packedByUserId: row.packed_by_user_id || null,
+    dispatchedAt: row.dispatched_at ? new Date(row.dispatched_at) : null,
+    dispatchedByName: row.dispatched_by_name || null,
+    dispatchedByUserId: row.dispatched_by_user_id || null,
     completedAt: row.completed_at ? new Date(row.completed_at) : null,
     closedAt: row.closed_at ? new Date(row.closed_at) : null,
     failureReason: row.failure_reason,
@@ -77,6 +99,12 @@ function rowToQuery(row) {
 
 // ─── SUBSCRIPTIONS ─────────────────────────────────────────────────────────
 const RECENT_QUERIES_LIMIT = 50;
+// Visibility window — queries older than this disappear from dashboards
+// (Follow-Ups tab uses its own query and is exempt).
+const VISIBILITY_DAYS = 15;
+function visibilityCutoffISO() {
+  return new Date(Date.now() - VISIBILITY_DAYS * 24 * 60 * 60 * 1000).toISOString();
+}
 
 /**
  * Subscribe to the most-recent queries in real-time.
@@ -105,6 +133,7 @@ export function subscribeToQueries(callback, errorCallback) {
       const { data, error } = await supabase
         .from('queries')
         .select('*')
+        .gte('last_activity_at', visibilityCutoffISO())
         .order('created_at', { ascending: false })
         .limit(RECENT_QUERIES_LIMIT);
       if (error) {
@@ -116,29 +145,23 @@ export function subscribeToQueries(callback, errorCallback) {
       callback(cache);
     } finally {
       inFlight = false;
-      if (dirty) initial(); // an event came in mid-fetch — try again
+      if (dirty) initial();
     }
   };
 
   initial();
 
-  // Debounce realtime events so a burst doesn't trigger N back-to-back SELECTs.
   const scheduleRefetch = () => {
     if (pendingTimer) clearTimeout(pendingTimer);
-    pendingTimer = setTimeout(() => {
-      pendingTimer = null;
-      initial();
-    }, 300);
+    pendingTimer = setTimeout(() => { pendingTimer = null; initial(); }, 300);
   };
 
   const channel = subscribeToTable('queries', '*', scheduleRefetch);
 
-  // Re-fetch when the app comes back to foreground.
   const appStateSub = AppState.addEventListener('change', (nextState) => {
     if (nextState === 'active') initial();
   });
 
-  // Immediate refresh after any local action (triggerLocalRefresh below).
   const unsubRefresh = _subscribeRefresh(initial);
 
   return () => {
@@ -167,6 +190,7 @@ export function subscribeToQueriesByStatuses(statuses, callback, errorCallback) 
         .from('queries')
         .select('*')
         .in('status', statuses)
+        .gte('last_activity_at', visibilityCutoffISO())
         .order('created_at', { ascending: false });
       if (error) {
         console.error('Error loading filtered queries:', error);
@@ -197,6 +221,59 @@ export function subscribeToQueriesByStatuses(statuses, callback, errorCallback) 
     if (nextState === 'active') initial();
   });
 
+  const unsubRefresh = _subscribeRefresh(initial);
+
+  return () => {
+    if (pendingTimer) clearTimeout(pendingTimer);
+    appStateSub?.remove();
+    unsubRefresh();
+    channel.unsubscribe();
+  };
+}
+
+/**
+ * Subscribe to queries that have an unresolved follow-up note.
+ * Used by the Follow-Ups tab (sales + owner).
+ */
+export function subscribeToFollowUps(callback, errorCallback) {
+  let pendingTimer = null;
+  let inFlight = false;
+  let dirty = false;
+
+  const initial = async () => {
+    if (inFlight) { dirty = true; return; }
+    inFlight = true;
+    try {
+      dirty = false;
+      const { data, error } = await supabase
+        .from('queries')
+        .select('*')
+        .not('follow_up_note', 'is', null)
+        .eq('follow_up_resolved', false)
+        .order('last_activity_at', { ascending: false });
+      if (error) {
+        console.error('Error loading follow-ups:', error);
+        if (errorCallback) errorCallback(error);
+        return;
+      }
+      callback(data.map(rowToQuery));
+    } finally {
+      inFlight = false;
+      if (dirty) initial();
+    }
+  };
+
+  initial();
+
+  const scheduleRefetch = () => {
+    if (pendingTimer) clearTimeout(pendingTimer);
+    pendingTimer = setTimeout(() => { pendingTimer = null; initial(); }, 300);
+  };
+
+  const channel = subscribeToTable('queries', '*', scheduleRefetch);
+  const appStateSub = AppState.addEventListener('change', (next) => {
+    if (next === 'active') initial();
+  });
   const unsubRefresh = _subscribeRefresh(initial);
 
   return () => {
@@ -265,12 +342,13 @@ export async function createQuery({
   customerName,
   customerCategory,
   items,
-  requiredSets,
-  projectedRevenue,
+  origin,
   notes,
   userId,
   userName,
 }) {
+  // Note: cartoons/lots quantities are entered at Mark Booked time (not here).
+  // Products in a query are optional — a query may just be "send photos of X".
   const { data, error } = await supabase
     .from('queries')
     .insert({
@@ -278,9 +356,10 @@ export async function createQuery({
       customer_name: customerName,
       customer_category: customerCategory || 'D',
       items: items || [],
-      required_sets: Number(requiredSets),
-      projected_revenue: Number(projectedRevenue) || 0,
+      required_sets: 0,
+      projected_revenue: 0,
       notes: notes || '',
+      origin: origin || null,
       status: STATUS.OPEN_QUERY,
       created_by_user_id: userId,
       created_by_name: userName,
@@ -293,10 +372,10 @@ export async function createQuery({
 }
 
 export async function claimQuery(queryId, userId, userName, userRole) {
-  // Role check is enforced server-side in the RPC, but we still pre-check
-  // for a clear error message — matches the Firebase version's UX.
-  if (userRole && userRole !== 'salesperson') {
-    return { success: false, message: 'Only salespersons can claim queries.' };
+  // Role check is enforced server-side in the RPC; this pre-check gives a
+  // clean error message before the network call.
+  if (userRole && userRole !== 'salesperson' && userRole !== 'owner') {
+    return { success: false, message: 'Only salesperson or owner can claim queries.' };
   }
   const { data, error } = await supabase.rpc('claim_query', { query_id: queryId });
   if (error) return { success: false, message: error.message };
@@ -304,10 +383,10 @@ export async function claimQuery(queryId, userId, userName, userRole) {
   return data;
 }
 
-export async function snoozeQuery(queryId, followUpDate) {
-  const followUp = followUpDate.toISOString().slice(0, 10); // YYYY-MM-DD
+export async function snoozeQuery(queryId, followUpDate, note) {
+  const followUp = followUpDate.toISOString().slice(0, 10);
   const { data, error } = await supabase.rpc('snooze_query', {
-    query_id: queryId, follow_up: followUp,
+    query_id: queryId, follow_up: followUp, note: (note || '').trim(),
   });
   if (error) throw new Error(error.message);
   if (!data.success) throw new Error(data.message);
@@ -346,10 +425,20 @@ export async function autoUnsnoozeExpired({ force = false } = {}) {
   return data || 0;
 }
 
-export async function markWon(queryId, requiredSets) {
+export async function markWon(queryId, cartoons, lots, followUpNote) {
   const { data, error } = await supabase.rpc('mark_won', {
-    query_id: queryId, final_sets: Number(requiredSets),
+    query_id: queryId,
+    p_cartoons: Number(cartoons) || 0,
+    p_lots: Number(lots) || 0,
+    p_follow_up_note: (followUpNote || '').trim() || null,
   });
+  if (error) throw new Error(error.message);
+  if (!data.success) throw new Error(data.message);
+  triggerLocalRefresh();
+}
+
+export async function resolveFollowUp(queryId) {
+  const { data, error } = await supabase.rpc('resolve_follow_up', { query_id: queryId });
   if (error) throw new Error(error.message);
   if (!data.success) throw new Error(data.message);
   triggerLocalRefresh();
@@ -374,8 +463,33 @@ export async function cancelVerificationFailed(queryId, reason) {
 }
 
 export async function submitInvoiceNumber(queryId, invoice) {
+  // Legacy single-invoice helper. Calls the old RPC which redirects to
+  // add_invoice_entry with full cartoons+lots from the query.
   const { data, error } = await supabase.rpc('submit_invoice_number', {
     query_id: queryId, invoice: invoice,
+  });
+  if (error) throw new Error(error.message);
+  if (!data.success) throw new Error(data.message);
+  triggerLocalRefresh();
+}
+
+export async function addInvoiceEntry(queryId, invoiceNo, cartoons, lots) {
+  const { data, error } = await supabase.rpc('add_invoice_entry', {
+    query_id: queryId,
+    invoice_no: (invoiceNo || '').trim(),
+    entry_cartoons: Number(cartoons) || 0,
+    entry_lots: Number(lots) || 0,
+  });
+  if (error) throw new Error(error.message);
+  if (!data.success) throw new Error(data.message);
+  triggerLocalRefresh();
+}
+
+export async function accountsUpdateQuantity(queryId, cartoons, lots) {
+  const { data, error } = await supabase.rpc('accounts_update_quantity', {
+    query_id: queryId,
+    new_cartoons: Number(cartoons) || 0,
+    new_lots: Number(lots) || 0,
   });
   if (error) throw new Error(error.message);
   if (!data.success) throw new Error(data.message);
@@ -399,11 +513,31 @@ export async function adminResetInvoiceAttempts(queryId) {
 }
 
 export async function updateDispatchedSets(queryId, setsShipped, operatorName) {
-  const { data, error } = await supabase.rpc('update_dispatched_sets', {
-    query_id: queryId,
-    sets_shipped: Number(setsShipped),
-    operator_name: operatorName || 'Unknown',
-  });
+  // Legacy path — old code may still call this. Forwards to mark_dispatched
+  // since dispatch is now a single toggle.
+  return markDispatched(queryId);
+}
+
+export async function markPacked(queryId) {
+  const { data, error } = await supabase.rpc('mark_packed', { query_id: queryId });
+  if (error) throw new Error(error.message);
+  if (!data.success) throw new Error(data.message);
+  triggerLocalRefresh();
+}
+export async function undoPacked(queryId) {
+  const { data, error } = await supabase.rpc('undo_packed', { query_id: queryId });
+  if (error) throw new Error(error.message);
+  if (!data.success) throw new Error(data.message);
+  triggerLocalRefresh();
+}
+export async function markDispatched(queryId) {
+  const { data, error } = await supabase.rpc('mark_dispatched', { query_id: queryId });
+  if (error) throw new Error(error.message);
+  if (!data.success) throw new Error(data.message);
+  triggerLocalRefresh();
+}
+export async function undoDispatched(queryId) {
+  const { data, error } = await supabase.rpc('undo_dispatched', { query_id: queryId });
   if (error) throw new Error(error.message);
   if (!data.success) throw new Error(data.message);
   triggerLocalRefresh();

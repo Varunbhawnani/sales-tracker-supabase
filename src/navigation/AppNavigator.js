@@ -15,6 +15,9 @@ import OwnerDashboardScreen from '../screens/OwnerDashboardScreen';
 import AdminScreen from '../screens/AdminScreen';
 import AccountsDashboardScreen from '../screens/AccountsDashboardScreen';
 import DispatchDashboardScreen from '../screens/DispatchDashboardScreen';
+import FollowUpsScreen from '../screens/FollowUpsScreen';
+import PackingDashboardScreen from '../screens/PackingDashboardScreen';
+import TasksScreen from '../screens/TasksScreen';
 
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
@@ -36,11 +39,22 @@ function DashboardStack()  { return <Stack.Navigator screenOptions={{ headerShow
 function AdminStack()      { return <Stack.Navigator screenOptions={{ headerShown: false }}><Stack.Screen name="AdminMain" component={AdminScreen} /></Stack.Navigator>; }
 function AccountsStack()   { return <Stack.Navigator screenOptions={{ headerShown: false }}><Stack.Screen name="AccountsMain" component={AccountsDashboardScreen} /></Stack.Navigator>; }
 function DispatchStack()   { return <Stack.Navigator screenOptions={{ headerShown: false }}><Stack.Screen name="DispatchMain" component={DispatchDashboardScreen} /></Stack.Navigator>; }
+function PackingStack()    { return <Stack.Navigator screenOptions={{ headerShown: false }}><Stack.Screen name="PackingMain" component={PackingDashboardScreen} /></Stack.Navigator>; }
+function TasksStack()      { return <Stack.Navigator screenOptions={{ headerShown: false }}><Stack.Screen name="TasksMain" component={TasksScreen} /></Stack.Navigator>; }
+function FollowUpsStack() {
+  return (
+    <Stack.Navigator screenOptions={{ headerShown: false }}>
+      <Stack.Screen name="FollowUpsMain" component={FollowUpsScreen} />
+      <Stack.Screen name="QueryDetail" component={QueryDetailScreen} options={{ headerShown: true, headerTitle: 'Query Details', headerTintColor: COLORS.primary, headerStyle: { backgroundColor: COLORS.surface } }} />
+    </Stack.Navigator>
+  );
+}
 
 // ─── Tab icons ──────────────────────────────────────────────────────────────
 const TAB_ICONS = {
   Feed: '📋', Leaderboard: '🏆', 'My Stats': '📊',
-  Dashboard: '📈', Admin: '⚙️', Accounts: '📑', Dispatch: '📦',
+  Dashboard: '📈', Admin: '⚙️', Accounts: '📑', Dispatch: '📦', Packing: '📥',
+  'Follow-Ups': '🔁', Tasks: '🗒',
 };
 
 function NativeTabIcon({ label, focused }) {
@@ -246,12 +260,25 @@ const fallbackStyles = StyleSheet.create({
 function getTabsForRole(role) {
   switch (role) {
     case ROLES.ACCOUNTS:
-      return [{ name: 'Accounts', component: AccountsStack }];
+      return [
+        { name: 'Accounts', component: AccountsStack },
+        { name: 'Tasks',    component: TasksStack },
+      ];
     case ROLES.DISPATCH:
-      return [{ name: 'Dispatch', component: DispatchStack }];
+      return [
+        { name: 'Dispatch', component: DispatchStack },
+        { name: 'Tasks',    component: TasksStack },
+      ];
+    case ROLES.PACKING:
+      return [
+        { name: 'Packing',  component: PackingStack },
+        { name: 'Tasks',    component: TasksStack },
+      ];
     case ROLES.OWNER:
       return [
         { name: 'Feed',        component: FeedStack },
+        { name: 'Follow-Ups',  component: FollowUpsStack },
+        { name: 'Tasks',       component: TasksStack },
         { name: 'Leaderboard', component: LeaderboardStack },
         { name: 'Dashboard',   component: DashboardStack },
         { name: 'Admin',       component: AdminStack },
@@ -259,6 +286,8 @@ function getTabsForRole(role) {
     case ROLES.SALESPERSON:
       return [
         { name: 'Feed',        component: FeedStack },
+        { name: 'Follow-Ups',  component: FollowUpsStack },
+        { name: 'Tasks',       component: TasksStack },
         { name: 'Leaderboard', component: LeaderboardStack },
         { name: 'My Stats',    component: MyStatsStack },
       ];

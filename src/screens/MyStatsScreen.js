@@ -15,9 +15,10 @@ import EmptyState from '../components/EmptyState';
 import LoadingState from '../components/LoadingState';
 
 const PERIOD_TABS = [
-  { key: TIME_PERIODS.ALL_TIME, label: 'All Time' },
-  { key: TIME_PERIODS.THIS_MONTH, label: 'This Month' },
-  { key: TIME_PERIODS.THIS_WEEK, label: 'This Week' },
+  { key: TIME_PERIODS.THIS_WEEK,  label: 'Week' },
+  { key: TIME_PERIODS.THIS_MONTH, label: 'Month' },
+  { key: TIME_PERIODS.THIS_YEAR,  label: 'Year' },
+  { key: TIME_PERIODS.ALL_TIME,   label: 'All Time' },
 ];
 
 const WON_STATUSES = [
@@ -75,7 +76,10 @@ export default function MyStatsScreen() {
         </View>
         <View style={styles.statsRow}>
           <StatCard label="Unsuccessful" value={stats?.totalUnsuccessful || 0} color={COLORS.unsuccessful} />
-          <StatCard label="Sets Sold" value={formatSets(stats?.totalSetsSold)} />
+          <StatCard label="Cartoons" value={stats?.totalCartoons || 0} color={COLORS.primary} />
+        </View>
+        <View style={styles.statsRow}>
+          <StatCard label="Lots" value={stats?.totalLots || 0} color={COLORS.primary} />
         </View>
         <View style={styles.statsRow}>
           <StatCard label="Success Rate" value={successRate} color={COLORS.primary} />

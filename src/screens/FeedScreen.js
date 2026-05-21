@@ -31,7 +31,7 @@ const FILTER_TABS = [
   { key: STATUS.OPEN_QUERY, label: 'Open' },
   { key: STATUS.CLAIMED_BY_SALES, label: 'Claimed' },
   { key: STATUS.SNOOZED, label: 'Snoozed' },
-  { key: STATUS.WON_PENDING_ACCOUNTS, label: 'Won' },
+  { key: STATUS.WON_PENDING_ACCOUNTS, label: 'Booked' },
   { key: STATUS.PENDING_VERIFICATION, label: 'Verifying' },
   { key: STATUS.VERIFICATION_FAILED, label: 'Failed' },
   { key: FILTER_IN_DISPATCH, label: 'Dispatch' },

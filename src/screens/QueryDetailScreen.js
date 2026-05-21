@@ -21,7 +21,7 @@ import Toast from 'react-native-toast-message';
 
 export default function QueryDetailScreen({ navigation, route }) {
   const { queryId } = route.params;
-  const { userId, userRole, isSalesperson } = useAuth();
+  const { userId, userRole, isSalesperson, isOwner } = useAuth();
 
   const [query, setQuery] = useState(route.params.query || null);
   const [loading, setLoading] = useState(!route.params.query);
@@ -30,9 +30,15 @@ export default function QueryDetailScreen({ navigation, route }) {
   const [showWonSheet, setShowWonSheet] = useState(false);
   const [showLostSheet, setShowLostSheet] = useState(false);
   const [showSnoozeSheet, setShowSnoozeSheet] = useState(false);
-  const [requiredSetsInput, setRequiredSetsInput] = useState('');
-  const [failureReason, setFailureReason] = useState('');
+  // Mark Booked sheet inputs
+  const [cartoonsInput, setCartoonsInput] = useState('');
+  const [lotsInput, setLotsInput] = useState('');
+  const [bookedFollowUp, setBookedFollowUp] = useState('');
+  // Snooze sheet inputs (note is now mandatory)
+  const [snoozeNote, setSnoozeNote] = useState('');
   const [followUpDate, setFollowUpDate] = useState(new Date(Date.now() + 86400000));
+  // Lost sheet inputs (reason now mandatory)
+  const [failureReason, setFailureReason] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
   const [showConfirmLost, setShowConfirmLost] = useState(false);
@@ -62,16 +68,23 @@ export default function QueryDetailScreen({ navigation, route }) {
   };
 
   const handleMarkWon = async () => {
-    const sets = requiredSetsInput ? Number(requiredSetsInput) : (query.requiredSets || 0);
-    if (!sets || sets <= 0) {
-      Alert.alert('Required', 'Please enter required sets.');
+    const c = cartoonsInput ? Number(cartoonsInput) : 0;
+    const l = lotsInput ? Number(lotsInput) : 0;
+    if (Number.isNaN(c) || Number.isNaN(l) || c < 0 || l < 0) {
+      Alert.alert('Invalid', 'Cartoons and lots must be zero or positive numbers.');
+      return;
+    }
+    if (c + l <= 0) {
+      Alert.alert('Required', 'Enter at least one cartoon or one lot.');
       return;
     }
     setSubmitting(true);
     try {
-      await markWon(queryId, sets);
+      await markWon(queryId, c, l, bookedFollowUp);
       setShowWonSheet(false);
-      setRequiredSetsInput('');
+      setCartoonsInput('');
+      setLotsInput('');
+      setBookedFollowUp('');
       Toast.show({ type: 'success', text1: 'Marked as Booked!', position: 'bottom' });
     } catch (error) {
       Alert.alert('Error', error.message || 'Failed to update.');
@@ -81,6 +94,10 @@ export default function QueryDetailScreen({ navigation, route }) {
   };
 
   const handleMarkLost = async () => {
+    if (!failureReason.trim()) {
+      Alert.alert('Required', 'Please enter a reason for marking lost.');
+      return;
+    }
     setShowConfirmLost(false);
     setSubmitting(true);
     try {
@@ -96,10 +113,15 @@ export default function QueryDetailScreen({ navigation, route }) {
   };
 
   const handleSnooze = async () => {
+    if (!snoozeNote.trim()) {
+      Alert.alert('Required', 'Please add a note describing what you are following up on.');
+      return;
+    }
     setSubmitting(true);
     try {
-      await snoozeQuery(queryId, followUpDate);
+      await snoozeQuery(queryId, followUpDate, snoozeNote.trim());
       setShowSnoozeSheet(false);
+      setSnoozeNote('');
       Toast.show({
         type: 'success', text1: 'Query snoozed',
         text2: `Follow-up: ${followUpDate.toLocaleDateString('en-IN')}`,
@@ -127,7 +149,7 @@ export default function QueryDetailScreen({ navigation, route }) {
   if (loading || !query) return <LoadingState />;
 
   const isClaimedByMe = query.claimedBy?.userId === userId;
-  const canClaim = query.status === STATUS.OPEN_QUERY && isSalesperson;
+  const canClaim = query.status === STATUS.OPEN_QUERY && (isSalesperson || isOwner);
   const canActSales = isClaimedByMe && (query.status === STATUS.CLAIMED_BY_SALES);
   const canUnsnooze = isClaimedByMe && query.status === STATUS.SNOOZED;
   const canCancelFromSnooze = isClaimedByMe && query.status === STATUS.SNOOZED;
@@ -148,32 +170,40 @@ export default function QueryDetailScreen({ navigation, route }) {
           {query.customerCategory && (
             <TierBadge category={query.customerCategory} style={{ marginLeft: 8 }} />
           )}
+          {query.origin && (
+            <View style={[styles.originBadge, query.origin === 'online' ? styles.originOnline : styles.originOffline]}>
+              <Text style={styles.originBadgeText}>{query.origin === 'online' ? '🌐 Online' : '🏪 Offline'}</Text>
+            </View>
+          )}
         </View>
 
         <View style={styles.detailsCard}>
-          <View style={styles.detailRow}>
-            <Text style={styles.detailLabel}>Required Sets</Text>
-            <Text style={styles.detailValue}>{formatQuantity(query.requiredSets)}</Text>
-          </View>
-          <Text style={styles.pairsHint}>1 Set = 8 Pairs</Text>
-
-          {query.projectedRevenue > 0 && (
-            <View style={styles.detailRow}>
-              <Text style={styles.detailLabel}>Projected Revenue</Text>
-              <Text style={[styles.detailValue, { color: COLORS.primaryLight }]}>
-                ₹{query.projectedRevenue.toLocaleString('en-IN')}
-              </Text>
-            </View>
+          {(query.cartoons > 0 || query.lots > 0) ? (
+            <>
+              {query.cartoons > 0 && (
+                <View style={styles.detailRow}>
+                  <Text style={styles.detailLabel}>Cartoons</Text>
+                  <Text style={styles.detailValue}>{query.cartoons}</Text>
+                </View>
+              )}
+              {query.lots > 0 && (
+                <View style={styles.detailRow}>
+                  <Text style={styles.detailLabel}>Lots</Text>
+                  <Text style={styles.detailValue}>{query.lots}</Text>
+                </View>
+              )}
+            </>
+          ) : (
+            <Text style={styles.pairsHint}>Quantity to be entered at Mark Booked.</Text>
           )}
 
           {query.items && query.items.length > 0 && (
             <>
               <View style={styles.separator} />
-              <Text style={styles.sectionLabel}>Items</Text>
+              <Text style={styles.sectionLabel}>Products</Text>
               {query.items.map((item, idx) => (
                 <View key={idx} style={styles.itemRow}>
                   <Text style={styles.itemName} numberOfLines={1}>{item.productName || 'Product'}</Text>
-                  <Text style={styles.itemDetail}>{item.quantity} × ₹{item.unitPrice?.toLocaleString('en-IN')}</Text>
                 </View>
               ))}
             </>
@@ -188,6 +218,18 @@ export default function QueryDetailScreen({ navigation, route }) {
               </View>
             </>
           ) : null}
+
+          {query.followUpNote && !query.followUpResolved && (
+            <>
+              <View style={styles.separator} />
+              <View style={styles.detailRow}>
+                <Text style={styles.detailLabel}>
+                  Follow-up {query.followUpOrigin ? `(${query.followUpOrigin})` : ''}
+                </Text>
+                <Text style={styles.notesText}>{query.followUpNote}</Text>
+              </View>
+            </>
+          )}
 
           <View style={styles.separator} />
           <View style={styles.detailRow}>
@@ -313,10 +355,30 @@ export default function QueryDetailScreen({ navigation, route }) {
       )}
 
       <BottomSheet visible={showWonSheet} title="Mark as Booked" onClose={() => setShowWonSheet(false)}>
-        <Text style={styles.sheetLabel}>Required Sets *</Text>
-        <TextInput style={styles.sheetInput} placeholder={String(query.requiredSets || '')} placeholderTextColor={COLORS.textTertiary} value={requiredSetsInput} onChangeText={setRequiredSetsInput} keyboardType="numeric" autoFocus />
-        <Text style={styles.sheetHelper}>{query.requiredSets ? `Pre-filled: ${query.requiredSets} sets` : '1 Set = 8 Pairs'}</Text>
-        <TouchableOpacity style={[styles.sheetButton, { backgroundColor: COLORS.wonPendingAccounts }]} onPress={handleMarkWon} disabled={submitting}>
+        <View style={styles.sheetRow}>
+          <View style={styles.sheetCol}>
+            <Text style={styles.sheetLabel}>Cartoons</Text>
+            <TextInput style={styles.sheetInput} placeholder="0" placeholderTextColor={COLORS.textTertiary}
+              value={cartoonsInput} onChangeText={t => setCartoonsInput(t.replace(/[^0-9]/g, ''))}
+              keyboardType="numeric" autoFocus />
+          </View>
+          <View style={styles.sheetCol}>
+            <Text style={styles.sheetLabel}>Lots</Text>
+            <TextInput style={styles.sheetInput} placeholder="0" placeholderTextColor={COLORS.textTertiary}
+              value={lotsInput} onChangeText={t => setLotsInput(t.replace(/[^0-9]/g, ''))}
+              keyboardType="numeric" />
+          </View>
+        </View>
+        <Text style={styles.sheetHelper}>Enter at least one of cartoons or lots.</Text>
+
+        <Text style={[styles.sheetLabel, { marginTop: 14 }]}>Follow-up note (optional)</Text>
+        <TextInput style={[styles.sheetInput, { minHeight: 70 }]}
+          placeholder="E.g. customer wants kids size next week, or asked for catalogue of formals…"
+          placeholderTextColor={COLORS.textTertiary}
+          value={bookedFollowUp} onChangeText={setBookedFollowUp} multiline />
+        <Text style={styles.sheetHelper}>Anything more the customer wanted that's not in this booking. Shows up in the Follow-Ups tab.</Text>
+
+        <TouchableOpacity style={[styles.sheetButton, { backgroundColor: COLORS.wonPendingAccounts, marginTop: 16 }]} onPress={handleMarkWon} disabled={submitting}>
           {submitting ? <ActivityIndicator color={COLORS.white} /> : <Text style={styles.sheetButtonText}>Confirm Booked</Text>}
         </TouchableOpacity>
       </BottomSheet>
@@ -328,15 +390,28 @@ export default function QueryDetailScreen({ navigation, route }) {
           minimumDate={new Date(Date.now() + 86400000)}
           onChange={setFollowUpDate}
         />
-        <TouchableOpacity style={[styles.sheetButton, { backgroundColor: COLORS.snoozed }]} onPress={handleSnooze} disabled={submitting}>
+        <Text style={[styles.sheetLabel, { marginTop: 14 }]}>Notes *</Text>
+        <TextInput style={[styles.sheetInput, { minHeight: 70 }]}
+          placeholder="What are you following up on? E.g. waiting for customer to confirm color choice."
+          placeholderTextColor={COLORS.textTertiary}
+          value={snoozeNote} onChangeText={setSnoozeNote} multiline />
+        <Text style={styles.sheetHelper}>Required. Appears in the Follow-Ups tab.</Text>
+        <TouchableOpacity style={[styles.sheetButton, { backgroundColor: COLORS.snoozed, marginTop: 12 }]} onPress={handleSnooze} disabled={submitting}>
           {submitting ? <ActivityIndicator color={COLORS.white} /> : <Text style={styles.sheetButtonText}>Confirm Snooze</Text>}
         </TouchableOpacity>
       </BottomSheet>
 
       <BottomSheet visible={showLostSheet} title="Mark as Lost / Cancelled" onClose={() => setShowLostSheet(false)}>
-        <Text style={styles.sheetLabel}>Reason (optional)</Text>
-        <TextInput style={[styles.sheetInput, { minHeight: 60 }]} placeholder="Reason (optional)" placeholderTextColor={COLORS.textTertiary} value={failureReason} onChangeText={setFailureReason} multiline />
-        <TouchableOpacity style={[styles.sheetButton, { backgroundColor: COLORS.lostCancelled }]} onPress={() => setShowConfirmLost(true)} disabled={submitting}>
+        <Text style={styles.sheetLabel}>Reason *</Text>
+        <TextInput style={[styles.sheetInput, { minHeight: 70 }]}
+          placeholder="Why is this lost? E.g. customer found cheaper elsewhere, didn't have stock, etc."
+          placeholderTextColor={COLORS.textTertiary}
+          value={failureReason} onChangeText={setFailureReason} multiline autoFocus />
+        <Text style={styles.sheetHelper}>Required.</Text>
+        <TouchableOpacity style={[styles.sheetButton, { backgroundColor: COLORS.lostCancelled, marginTop: 8 }]} onPress={() => {
+          if (!failureReason.trim()) { Alert.alert('Required', 'Please enter a reason.'); return; }
+          setShowConfirmLost(true);
+        }} disabled={submitting}>
           {submitting ? <ActivityIndicator color={COLORS.white} /> : <Text style={styles.sheetButtonText}>Confirm Lost</Text>}
         </TouchableOpacity>
       </BottomSheet>
@@ -355,6 +430,12 @@ const styles = StyleSheet.create({
   timeAgo: { fontSize: 13, fontFamily: 'Inter_400Regular', color: COLORS.textTertiary },
   nameRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 20 },
   partyName: { fontSize: 24, fontFamily: 'Inter_700Bold', color: COLORS.primary },
+  originBadge: {
+    marginLeft: 8, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8,
+  },
+  originOnline: { backgroundColor: '#E0F2FE' },
+  originOffline: { backgroundColor: '#FEF3C7' },
+  originBadgeText: { fontSize: 11, fontFamily: 'Inter_600SemiBold', color: COLORS.textPrimary },
   detailsCard: { backgroundColor: COLORS.surface, borderRadius: 20, padding: 20, shadowColor: COLORS.black, shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.06, shadowRadius: 8, elevation: 3 },
   detailRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 },
   detailLabel: { fontSize: 13, fontFamily: 'Inter_500Medium', color: COLORS.textSecondary, flex: 1 },
@@ -376,6 +457,8 @@ const styles = StyleSheet.create({
   actionButton: { flex: 1, borderRadius: 14, paddingVertical: 14, alignItems: 'center' },
   actionButtonText: { fontSize: 13, fontFamily: 'Inter_700Bold', color: COLORS.white },
   sheetLabel: { fontSize: 13, fontFamily: 'Inter_600SemiBold', color: COLORS.textSecondary, marginBottom: 8 },
+  sheetRow: { flexDirection: 'row', gap: 12 },
+  sheetCol: { flex: 1 },
   sheetInput: { backgroundColor: COLORS.background, borderRadius: 12, paddingVertical: 12, paddingHorizontal: 14, fontSize: 15, fontFamily: 'Inter_400Regular', color: COLORS.textPrimary, borderWidth: 1, borderColor: COLORS.border },
   sheetHelper: { fontSize: 11, fontFamily: 'Inter_400Regular', color: COLORS.textTertiary, marginTop: 4, marginBottom: 16 },
   sheetButton: { borderRadius: 14, paddingVertical: 14, alignItems: 'center', marginTop: 8 },

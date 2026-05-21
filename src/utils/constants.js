@@ -151,11 +151,15 @@ export const ROLES = {
   OWNER: 'owner',
   SALESPERSON: 'salesperson',
   ACCOUNTS: 'accounts',
+  PACKING: 'packing',
   DISPATCH: 'dispatch',
 };
 
+export const TIME_PERIODS_LIST = ['this_week', 'this_month', 'this_year', 'all_time'];
+
 export const TIME_PERIODS = {
   ALL_TIME: 'all_time',
+  THIS_YEAR: 'this_year',
   THIS_MONTH: 'this_month',
   THIS_WEEK: 'this_week',
 };

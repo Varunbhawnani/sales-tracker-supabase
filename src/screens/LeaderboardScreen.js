@@ -11,13 +11,15 @@ import LoadingState from '../components/LoadingState';
 import ExportButton from '../components/ExportButton';
 
 const PERIOD_TABS = [
+  { key: TIME_PERIODS.THIS_WEEK, label: 'Week' },
+  { key: TIME_PERIODS.THIS_MONTH, label: 'Month' },
+  { key: TIME_PERIODS.THIS_YEAR, label: 'Year' },
   { key: TIME_PERIODS.ALL_TIME, label: 'All Time' },
-  { key: TIME_PERIODS.THIS_MONTH, label: 'This Month' },
-  { key: TIME_PERIODS.THIS_WEEK, label: 'This Week' },
 ];
 
 const PERIOD_LABELS = {
   [TIME_PERIODS.ALL_TIME]: 'AllTime',
+  [TIME_PERIODS.THIS_YEAR]: 'ThisYear',
   [TIME_PERIODS.THIS_MONTH]: 'ThisMonth',
   [TIME_PERIODS.THIS_WEEK]: 'ThisWeek',
 };
@@ -67,17 +69,17 @@ export default function LeaderboardScreen() {
           <View style={[styles.podiumItem, styles.podiumSecond]}>
             <Text style={styles.podiumMedal}>2</Text>
             <Text style={styles.podiumName} numberOfLines={1}>{data[1]?.name}</Text>
-            <Text style={styles.podiumSets}>{data[1]?.totalSetsSold || 0} Sets</Text>
+            <Text style={styles.podiumSets}>{(data[1]?.totalCartoons || 0)} c · {(data[1]?.totalLots || 0)} l</Text>
           </View>
           <View style={[styles.podiumItem, styles.podiumFirst]}>
             <Text style={styles.podiumMedal}>1</Text>
             <Text style={styles.podiumName} numberOfLines={1}>{data[0]?.name}</Text>
-            <Text style={styles.podiumSets}>{data[0]?.totalSetsSold || 0} Sets</Text>
+            <Text style={styles.podiumSets}>{(data[0]?.totalCartoons || 0)} c · {(data[0]?.totalLots || 0)} l</Text>
           </View>
           <View style={[styles.podiumItem, styles.podiumThird]}>
             <Text style={styles.podiumMedal}>3</Text>
             <Text style={styles.podiumName} numberOfLines={1}>{data[2]?.name}</Text>
-            <Text style={styles.podiumSets}>{data[2]?.totalSetsSold || 0} Sets</Text>
+            <Text style={styles.podiumSets}>{(data[2]?.totalCartoons || 0)} c · {(data[2]?.totalLots || 0)} l</Text>
           </View>
         </View>
       )}

@@ -1,6 +1,5 @@
-import { supabase } from '../lib/supabase';
+import { supabase, subscribeToTable } from '../lib/supabase';
 import { STATUS, LEGACY_STATUS, TIME_PERIODS } from '../utils/constants';
-import { getStartOfWeek, getStartOfMonth } from '../utils/timeUtils';
 
 const WON_STATUSES = [
   STATUS.WON_PENDING_ACCOUNTS,
@@ -16,125 +15,120 @@ const CLAIMED_STATUSES = [
   ...WON_STATUSES, ...LOST_STATUSES, LEGACY_STATUS.CLAIMED,
 ];
 
-function rowToStats(row) {
-  if (!row) return null;
-  return {
-    id: row.user_id,
-    userId: row.user_id,
-    name: row.name,
-    totalClaimed: row.total_claimed,
-    totalSuccessful: row.total_successful,
-    totalUnsuccessful: row.total_unsuccessful,
-    totalSetsSold: row.total_sets_sold,
-  };
+// ─── Time-window helpers ─────────────────────────────────────────────────
+function startOfThisWeek() {
+  const d = new Date();
+  const day = d.getDay() || 7; // Sun=0 → 7
+  if (day !== 1) d.setHours(-24 * (day - 1));
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+function startOfThisMonth() {
+  const d = new Date();
+  return new Date(d.getFullYear(), d.getMonth(), 1);
+}
+function startOfThisYear() {
+  const d = new Date();
+  return new Date(d.getFullYear(), 0, 1);
+}
+function periodStart(period) {
+  switch (period) {
+    case TIME_PERIODS.THIS_WEEK: return startOfThisWeek();
+    case TIME_PERIODS.THIS_MONTH: return startOfThisMonth();
+    case TIME_PERIODS.THIS_YEAR: return startOfThisYear();
+    case TIME_PERIODS.ALL_TIME:
+    default: return null;
+  }
 }
 
+// Subscribing to salesperson_stats lives here for legacy callers, but the
+// numbers shown in the UI now ALWAYS recompute from queries so accounts-edits
+// to cartoons/lots immediately reflect in everyone's stats.
 let _statsChannelCounter = 0;
 export function subscribeToSalespersonStats(callback) {
   const initial = async () => {
-    const { data, error } = await supabase
-      .from('salesperson_stats').select('*')
-      .order('total_sets_sold', { ascending: false });
-    if (error) {
-      console.error('Error loading stats:', error);
-      return;
-    }
-    callback(data.map(rowToStats));
+    const data = await getLeaderboardData(TIME_PERIODS.ALL_TIME);
+    callback(data);
   };
   initial();
   _statsChannelCounter += 1;
   const channel = supabase
-    .channel(`public:salesperson_stats:${_statsChannelCounter}`)
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'salesperson_stats' }, initial)
+    .channel(`public:queries:stats:${_statsChannelCounter}`)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'queries' }, initial)
     .subscribe();
   return () => channel.unsubscribe();
 }
 
-/**
- * Leaderboard for a time period.
- * - ALL_TIME → uses the cached salesperson_stats counters (1 read per user)
- * - This week / month → recomputes from queries with last_activity_at filter
- */
-export async function getLeaderboardData(period = TIME_PERIODS.ALL_TIME) {
-  // Exclude owners
-  const { data: users } = await supabase.from('users').select('id, name, role');
-  const ownerIds = new Set((users || []).filter(u => u.role === 'owner').map(u => u.id));
+// ─── Pure computation: returns leaderboard rows for the given period ─────
+async function fetchUsers() {
+  const { data } = await supabase.from('users').select('id, name, role, is_active');
+  return data || [];
+}
 
-  if (period === TIME_PERIODS.ALL_TIME) {
-    const { data, error } = await supabase
-      .from('salesperson_stats').select('*')
-      .order('total_sets_sold', { ascending: false });
-    if (error) throw error;
-    return data
-      .filter(d => !ownerIds.has(d.user_id))
-      .map((d, i) => ({ ...rowToStats(d), rank: i + 1 }));
-  }
-
-  let startDate;
-  if (period === TIME_PERIODS.THIS_MONTH) startDate = getStartOfMonth();
-  else if (period === TIME_PERIODS.THIS_WEEK) startDate = getStartOfWeek();
-
-  const hasValidStartDate = startDate instanceof Date && !isNaN(startDate.getTime());
-
-  let qry = supabase.from('queries').select('*');
-  if (hasValidStartDate) qry = qry.gte('last_activity_at', startDate.toISOString());
-
-  const { data: queries, error } = await qry;
+async function fetchQueriesForPeriod(period) {
+  const start = periodStart(period);
+  let q = supabase.from('queries').select(
+    'id, status, claimed_by_user_id, claimed_by_name, cartoons, lots, required_sets, last_activity_at, created_at'
+  );
+  if (start) q = q.gte('last_activity_at', start.toISOString());
+  const { data, error } = await q;
   if (error) throw error;
+  return data || [];
+}
 
-  const statsMap = {};
-  queries.forEach(q => {
-    if (!q.claimed_by_user_id) return;
+function aggregateBySalesperson(queries, owners) {
+  const ownerIds = new Set(owners);
+  const map = {};
+  for (const q of queries) {
+    if (!q.claimed_by_user_id || ownerIds.has(q.claimed_by_user_id)) continue;
     const userId = q.claimed_by_user_id;
-    if (!statsMap[userId]) {
-      statsMap[userId] = {
-        id: userId, userId, name: q.claimed_by_name || 'Unknown',
-        totalClaimed: 0, totalSuccessful: 0, totalUnsuccessful: 0, totalSetsSold: 0,
+    if (!map[userId]) {
+      map[userId] = {
+        id: userId, userId,
+        name: q.claimed_by_name || 'Unknown',
+        totalClaimed: 0, totalSuccessful: 0, totalUnsuccessful: 0,
+        totalCartoons: 0, totalLots: 0, totalSetsSold: 0,
       };
     }
-    if (CLAIMED_STATUSES.includes(q.status)) statsMap[userId].totalClaimed++;
-    if (WON_STATUSES.includes(q.status)) {
-      statsMap[userId].totalSuccessful++;
-      statsMap[userId].totalSetsSold += (q.required_sets || 0);
-    }
-    if (LOST_STATUSES.includes(q.status)) statsMap[userId].totalUnsuccessful++;
-  });
+    const entry = map[userId];
+    const isWon = WON_STATUSES.includes(q.status);
+    const isLost = LOST_STATUSES.includes(q.status);
+    const isClaimed = CLAIMED_STATUSES.includes(q.status);
 
-  return Object.values(statsMap)
-    .filter(d => !ownerIds.has(d.id))
-    .sort((a, b) => b.totalSetsSold - a.totalSetsSold)
-    .map((d, i) => ({ ...d, rank: i + 1 }));
+    if (isClaimed) entry.totalClaimed += 1;
+    if (isWon) {
+      entry.totalSuccessful += 1;
+      const c = q.cartoons || 0;
+      const l = q.lots || 0;
+      const fallback = q.required_sets || 0;
+      // If cartoons+lots are both zero (very old queries), fall back to required_sets.
+      const setsLike = (c + l) > 0 ? (c + l) : fallback;
+      entry.totalCartoons += c;
+      entry.totalLots += l;
+      entry.totalSetsSold += setsLike;
+    }
+    if (isLost) entry.totalUnsuccessful += 1;
+  }
+  return Object.values(map);
+}
+
+// ─── Public API ──────────────────────────────────────────────────────────
+export async function getLeaderboardData(period = TIME_PERIODS.ALL_TIME) {
+  const [queries, users] = await Promise.all([fetchQueriesForPeriod(period), fetchUsers()]);
+  const owners = users.filter(u => u.role === 'owner').map(u => u.id);
+
+  const rows = aggregateBySalesperson(queries, owners);
+  return rows
+    .sort((a, b) => (b.totalCartoons + b.totalLots) - (a.totalCartoons + a.totalLots))
+    .map((r, i) => ({ ...r, rank: i + 1 }));
 }
 
 export async function getMyStats(userId, period = TIME_PERIODS.ALL_TIME) {
-  if (period === TIME_PERIODS.ALL_TIME) {
-    const { data } = await supabase
-      .from('salesperson_stats').select('*').eq('user_id', userId).maybeSingle();
-    return rowToStats(data) || {
-      totalClaimed: 0, totalSuccessful: 0, totalUnsuccessful: 0, totalSetsSold: 0,
-    };
+  if (!userId) {
+    return { totalClaimed: 0, totalSuccessful: 0, totalUnsuccessful: 0, totalCartoons: 0, totalLots: 0, totalSetsSold: 0 };
   }
-
-  let startDate;
-  if (period === TIME_PERIODS.THIS_MONTH) startDate = getStartOfMonth();
-  else if (period === TIME_PERIODS.THIS_WEEK) startDate = getStartOfWeek();
-
-  const { data: queries } = await supabase
-    .from('queries').select('*')
-    .eq('claimed_by_user_id', userId);
-  let totalClaimed = 0, totalSuccessful = 0, totalUnsuccessful = 0, totalSetsSold = 0;
-  (queries || []).forEach(q => {
-    const closedAt = q.closed_at ? new Date(q.closed_at) : null;
-    const wonAt = q.won_at ? new Date(q.won_at) : null;
-    const claimedAt = q.claimed_at ? new Date(q.claimed_at) : null;
-    const relevant = closedAt || wonAt || claimedAt;
-    if (startDate && (!relevant || relevant < startDate)) return;
-    totalClaimed++;
-    if (WON_STATUSES.includes(q.status)) {
-      totalSuccessful++;
-      totalSetsSold += (q.required_sets || 0);
-    }
-    if (LOST_STATUSES.includes(q.status)) totalUnsuccessful++;
-  });
-  return { totalClaimed, totalSuccessful, totalUnsuccessful, totalSetsSold };
+  const queries = await fetchQueriesForPeriod(period);
+  const mine = queries.filter(q => q.claimed_by_user_id === userId);
+  const agg = aggregateBySalesperson(mine, [])[0];
+  return agg || { id: userId, userId, name: '', totalClaimed: 0, totalSuccessful: 0, totalUnsuccessful: 0, totalCartoons: 0, totalLots: 0, totalSetsSold: 0 };
 }

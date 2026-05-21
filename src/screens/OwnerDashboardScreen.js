@@ -36,9 +36,11 @@ const OPEN_STATUSES = [STATUS.OPEN_QUERY, STATUS.CLAIMED_BY_SALES, STATUS.SNOOZE
 const ACCOUNTS_PIPELINE = [STATUS.WON_PENDING_ACCOUNTS, STATUS.PENDING_VERIFICATION, STATUS.VERIFICATION_FAILED];
 const DISPATCH_PIPELINE = [STATUS.VERIFIED_PENDING_DISPATCH, STATUS.PARTIALLY_DISPATCHED];
 
-// 5-step pipeline visualisation: Open → Claimed → Booked → Verified → Shipped
-const PIPELINE_STAGES = ['Open', 'Claimed', 'Booked', 'Verified', 'Shipped'];
-function stageIndex(status) {
+// 6-step pipeline: Open → Claimed → Booked → Verified → Packed → Shipped
+const PIPELINE_STAGES = ['Open', 'Claimed', 'Booked', 'Verified', 'Packed', 'Shipped'];
+// stageIndex now takes the WHOLE query so it can read is_packed too.
+function stageIndex(query) {
+  const { status, isPacked } = query;
   switch (status) {
     case STATUS.OPEN_QUERY: return 0;
     case STATUS.CLAIMED_BY_SALES:
@@ -51,25 +53,28 @@ function stageIndex(status) {
     case STATUS.VERIFICATION_FAILED:
       return 2;
     case STATUS.VERIFIED_PENDING_DISPATCH:
-      return 3;
+      // After verification, the order goes to packing. Once packed, it
+      // sits in the dispatch queue. So:
+      return isPacked ? 4 : 3;
     case STATUS.PARTIALLY_DISPATCHED:
     case STATUS.COMPLETED:
     case LEGACY_STATUS.SUCCESSFUL:
-      return 4;
+      return 5;
     case STATUS.LOST_CANCELLED:
     case LEGACY_STATUS.UNSUCCESSFUL:
-      return -1; // dead-end
+      return -1;
     default:
       return 0;
   }
 }
 
 const PipelineBar = React.memo(function PipelineBar({ query }) {
-  const idx = stageIndex(query.status);
+  const idx = stageIndex(query);
   const isLost = idx === -1;
   const ageMs = query.createdAt ? (Date.now() - query.createdAt.getTime()) : 0;
   const ageDays = ageMs / (1000 * 60 * 60 * 24);
-  const stuckColor = ageDays > 5 && idx < 4 ? COLORS.warning : COLORS.primary;
+  // "Stuck" if still pre-shipped (idx < 5) after 5 days
+  const stuckColor = ageDays > 5 && idx < 5 ? COLORS.warning : COLORS.primary;
 
   return (
     <View style={pipelineStyles.card}>
@@ -168,13 +173,40 @@ export default function OwnerDashboardScreen() {
       .filter(q => [STATUS.VERIFIED_PENDING_DISPATCH, STATUS.PARTIALLY_DISPATCHED, STATUS.COMPLETED].includes(q.status))
       .reduce((s, q) => s + (q.requiredSets || 0), 0);
 
-    return { total, open, won, lost, pendingAccounts, pendingDispatch, completed, totalSetsSold, verificationFailed, partiallyDispatched, totalSetsDispatched, totalSetsRequired };
+    // ─── Packing throughput ──────────────────────────────────────────────────
+    // A query is "in packing" once verified and accounts handed it off — that
+    // is, status = verified_pending_dispatch AND is_packed = false.
+    // Once is_packed flips true it's "ready to ship" (still verified_pending_dispatch
+    // until dispatch ticks it off). We also count anything past dispatch as packed.
+    const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0);
+    const startOfWeek = new Date(); startOfWeek.setDate(startOfWeek.getDate() - 7); startOfWeek.setHours(0, 0, 0, 0);
+
+    const packingQueue = queries.filter(q =>
+      q.status === STATUS.VERIFIED_PENDING_DISPATCH && !q.isPacked
+    ).length;
+    const readyToShip = queries.filter(q =>
+      q.status === STATUS.VERIFIED_PENDING_DISPATCH && q.isPacked
+    ).length;
+    const packedToday = queries.filter(q =>
+      q.packedAt && q.packedAt.getTime() >= startOfToday.getTime()
+    ).length;
+    const packedThisWeek = queries.filter(q =>
+      q.packedAt && q.packedAt.getTime() >= startOfWeek.getTime()
+    ).length;
+
+    return {
+      total, open, won, lost, pendingAccounts, pendingDispatch, completed,
+      totalSetsSold, verificationFailed, partiallyDispatched,
+      totalSetsDispatched, totalSetsRequired,
+      packingQueue, readyToShip, packedToday, packedThisWeek,
+    };
   }, [queries]);
 
   const pipelineData = useMemo(() => [
     { label: 'Open', value: stats.open, color: COLORS.openQuery },
     { label: 'Accounts', value: stats.pendingAccounts, color: COLORS.pendingVerification },
-    { label: 'Dispatch', value: stats.pendingDispatch, color: COLORS.verifiedPendingDispatch },
+    { label: 'Packing', value: stats.packingQueue, color: COLORS.warning },
+    { label: 'Dispatch', value: stats.readyToShip + stats.partiallyDispatched, color: COLORS.verifiedPendingDispatch },
     { label: 'Done', value: stats.completed, color: COLORS.completed },
     { label: 'Lost', value: stats.lost, color: COLORS.lostCancelled },
   ], [stats]);
@@ -256,10 +288,27 @@ export default function OwnerDashboardScreen() {
             <Text style={styles.miniStatValue}>{stats.pendingAccounts}</Text>
             <Text style={styles.miniStatLabel}>Accounts</Text>
           </View>
+          <View style={[styles.miniStat, { borderLeftColor: COLORS.warning }]}>
+            <Text style={styles.miniStatValue}>{stats.packingQueue}</Text>
+            <Text style={styles.miniStatLabel}>Packing</Text>
+          </View>
           <View style={[styles.miniStat, { borderLeftColor: COLORS.verifiedPendingDispatch }]}>
-            <Text style={styles.miniStatValue}>{stats.pendingDispatch}</Text>
+            <Text style={styles.miniStatValue}>{stats.readyToShip + stats.partiallyDispatched}</Text>
             <Text style={styles.miniStatLabel}>Dispatch</Text>
           </View>
+        </View>
+      </View>
+
+      {/* ─── Packing team throughput ─── */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Packing Team</Text>
+        <View style={styles.statsRow}>
+          <StatCard label="In Queue" value={stats.packingQueue} color={COLORS.warning} />
+          <StatCard label="Ready to Ship" value={stats.readyToShip} color={COLORS.verifiedPendingDispatch} />
+        </View>
+        <View style={styles.statsRow}>
+          <StatCard label="Packed Today" value={stats.packedToday} color={COLORS.completed} />
+          <StatCard label="Packed This Week" value={stats.packedThisWeek} color={COLORS.primary} />
         </View>
       </View>
 
@@ -271,8 +320,14 @@ export default function OwnerDashboardScreen() {
         {stats.verificationFailed > 0 && (
           <InsightRow color={COLORS.danger} title={`${stats.verificationFailed} verification failures`} desc="Invoice not found in Tally — needs re-entry." />
         )}
-        {stats.pendingDispatch > 0 && (
-          <InsightRow color={COLORS.verifiedPendingDispatch} title={`${stats.pendingDispatch} pending dispatch`} desc="Verified and ready to ship." />
+        {stats.packingQueue > 0 && (
+          <InsightRow color={COLORS.warning} title={`${stats.packingQueue} awaiting packing`} desc="Verified by accounts, waiting for the packing team." />
+        )}
+        {stats.readyToShip > 0 && (
+          <InsightRow color={COLORS.verifiedPendingDispatch} title={`${stats.readyToShip} ready to ship`} desc="Packed and waiting for dispatch." />
+        )}
+        {stats.partiallyDispatched > 0 && (
+          <InsightRow color={COLORS.verifiedPendingDispatch} title={`${stats.partiallyDispatched} partially dispatched`} desc="Some sets shipped; the rest are still pending." />
         )}
         {salespersonStats.length > 0 && (
           <InsightRow color={COLORS.primary} title={`Top: ${salespersonStats[0]?.name}`} desc={`${salespersonStats[0]?.sets} sets · ${salespersonStats[0]?.won} booked · ${salespersonStats[0]?.rate}% rate`} />

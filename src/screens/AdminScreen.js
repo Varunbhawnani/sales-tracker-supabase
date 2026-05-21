@@ -17,8 +17,9 @@ import LoadingState from '../components/LoadingState';
 import Toast from 'react-native-toast-message';
 
 const ROLE_OPTIONS = [
-  { key: ROLES.SALESPERSON, label: 'Salesperson' },
+  { key: ROLES.SALESPERSON, label: 'Sales' },
   { key: ROLES.ACCOUNTS, label: 'Accounts' },
+  { key: ROLES.PACKING, label: 'Packing' },
   { key: ROLES.DISPATCH, label: 'Dispatch' },
 ];
 
@@ -26,6 +27,7 @@ const ROLE_LABELS = {
   [ROLES.OWNER]: 'Owner',
   [ROLES.SALESPERSON]: 'Sales',
   [ROLES.ACCOUNTS]: 'Accounts',
+  [ROLES.PACKING]: 'Packing',
   [ROLES.DISPATCH]: 'Dispatch',
 };
 

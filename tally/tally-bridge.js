@@ -1,25 +1,24 @@
 /**
- * tally-bridge.js — Supabase Edition
+ * tally-bridge.js — Supabase Edition (multi-invoice)
  *
- * Watches Supabase for queries with status='pending_verification', verifies
- * each invoice against Tally's Day Book, and updates the row.
+ * Watches Supabase for queries with status='pending_verification' and verifies
+ * each PENDING entry in `invoice_entries` against Tally's Day Book.
  *
- * Verification flow:
- *   1. Pull recent vouchers from Tally Day Book (TALLY_LOOKBACK_DAYS back,
- *      TALLY_FORWARD_DAYS ahead — covers backdated + future-dated invoices).
- *   2. Find the specific voucher matching the typed invoice number.
- *   3. Cross-check #1: same invoice number already verified for another
- *      query? Reject with a "duplicate invoice" message.
- *   4. Cross-check #2: party name on the Tally invoice matches the customer
- *      name on this query? Reject with a "wrong customer" message if not.
- *   5. All checks pass → mark verified.
+ * Per-entry verification:
+ *   1. Look the invoice up in Tally Day Book (configurable lookback window).
+ *   2. Party-name cross-check: voucher's PARTYLEDGERNAME must match the query's
+ *      customer_name (case-insensitive).
  *
- * Differences from the Firebase version:
- *   - Uses @supabase/supabase-js with the SERVICE_ROLE key (bypasses RLS).
- *   - Subscribes via Supabase Realtime instead of Firestore onSnapshot.
- *   - Adds the party-name + duplicate-invoice cross-checks (Ops Guide §7, §8.1).
- *   - Lookback / forward window now configurable via env (Ops Guide §6, §8.8, §8.9).
- *   - Auth-failure handling identical to the Firebase version (Ops Guide fix #25).
+ * Query-level state machine after processing:
+ *   • All entries verified AND sum covers query cartoons/lots → 'verified_pending_dispatch'.
+ *   • Any entry failed → 'verification_failed' AND invoice_attempt_count += 1.
+ *   • Some entries still pending (entry count > processed) → stay 'pending_verification'.
+ *   • All processed entries verified but sum doesn't cover → stay 'pending_verification'
+ *     (waiting for accounts to add more entries).
+ *
+ * Duplicate-invoice rejection (within a query and across queries) happens
+ * in the add_invoice_entry RPC before the bridge runs — the bridge trusts
+ * the entries it sees.
  */
 
 require('dotenv').config();
@@ -27,7 +26,7 @@ const { createClient } = require('@supabase/supabase-js');
 const axios = require('axios');
 const { XMLParser } = require('fast-xml-parser');
 
-// ─── Config ───────────────────────────────────────────────────────────────
+// ─── Config ───
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const TALLY_URL = process.env.TALLY_URL || 'http://localhost:9003';
@@ -56,16 +55,15 @@ const parser = new XMLParser({
   textNodeName: '_text',
 });
 
-// 5-minute cooldown after a Tally auth failure (fix #25 carry-over).
 const AUTH_FAILURE_COOLDOWN_MS = 5 * 60 * 1000;
 
-console.log('🚀 Tally Bridge (Supabase) running…');
+console.log('🚀 Tally Bridge (Supabase, multi-invoice) running…');
 console.log(`📌 Company           : ${TALLY_COMPANY || '(none)'}`);
 console.log(`🔗 Tally URL         : ${TALLY_URL}`);
 console.log(`📆 Lookback window   : ${TALLY_LOOKBACK_DAYS} days back, ${TALLY_FORWARD_DAYS} ahead`);
 console.log(`👤 Tally user        : ${TALLY_USER || '(none)'}\n`);
 
-// ─── Helpers ──────────────────────────────────────────────────────────────
+// ─── XML helpers ──────────────────────────────────────────────────────────
 function tallyVal(field) {
   if (field === null || field === undefined) return '';
   if (typeof field === 'object' && '_text' in field) return String(field['_text']).trim();
@@ -76,7 +74,6 @@ function normalizeInvoice(s) {
   return (s || '').trim().toUpperCase().replace(/\s+/g, '');
 }
 
-/** Walk a parsed-XML tree and collect every VOUCHER object found at any depth. */
 function collectVouchers(node, out = []) {
   if (node == null || typeof node !== 'object') return out;
   if (Array.isArray(node)) {
@@ -100,30 +97,14 @@ function fmtTallyDate(d) {
     String(d.getDate()).padStart(2, '0');
 }
 
-// ─── Core verification ────────────────────────────────────────────────────
-async function processVerification(row) {
-  const invoiceNo = row.tally_invoice_number;
-  if (!invoiceNo) return;
-
-  // ── Auth-failure cooldown ───────────────────────────────────────────────
-  if (row.last_auth_failure_at) {
-    const sinceFailMs = Date.now() - new Date(row.last_auth_failure_at).getTime();
-    if (sinceFailMs < AUTH_FAILURE_COOLDOWN_MS) {
-      console.log(`⏸  Auth-failure cooldown active for ${invoiceNo}, skipping.`);
-      return;
-    }
-  }
-
-  console.log(`\n🔍 Checking Tally for invoice: ${invoiceNo}`);
-
-  // ── Build the Day Book XML query ────────────────────────────────────────
+function buildDayBookXml() {
   const today = new Date();
   const pastDate = new Date();
   pastDate.setDate(today.getDate() - TALLY_LOOKBACK_DAYS);
   const futureDate = new Date();
   futureDate.setDate(today.getDate() + TALLY_FORWARD_DAYS);
 
-  const xmlPayload = `<ENVELOPE>
+  return `<ENVELOPE>
     <HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
     <BODY><EXPORTDATA><REQUESTDESC>
       <REPORTNAME>Day Book</REPORTNAME>
@@ -138,22 +119,40 @@ async function processVerification(row) {
       </STATICVARIABLES>
     </REQUESTDESC></EXPORTDATA></BODY>
   </ENVELOPE>`;
+}
 
+// ─── Per-query verification ───────────────────────────────────────────────
+async function processVerification(row) {
+  const entries = Array.isArray(row.invoice_entries) ? row.invoice_entries : [];
+  const pendingEntries = entries.filter(e => e && e.status === 'pending');
+  if (pendingEntries.length === 0) return;
+
+  // Auth-failure cooldown
+  if (row.last_auth_failure_at) {
+    const sinceFailMs = Date.now() - new Date(row.last_auth_failure_at).getTime();
+    if (sinceFailMs < AUTH_FAILURE_COOLDOWN_MS) {
+      console.log(`⏸  Auth-failure cooldown active for query ${row.id}, skipping.`);
+      return;
+    }
+  }
+
+  console.log(`\n🔍 Verifying query ${row.id} — ${pendingEntries.length} pending invoice(s).`);
+
+  // Fetch Day Book once for all entries (cheaper than per-entry queries)
   let response;
   try {
-    response = await axios.post(TALLY_URL, xmlPayload, {
+    response = await axios.post(TALLY_URL, buildDayBookXml(), {
       headers: { 'Content-Type': 'application/xml' }, timeout: 30000,
     });
   } catch (err) {
-    console.error(`❌ Tally connection error for ${invoiceNo}:`, err.message);
-    return; // leave the row pending; retry next time
+    console.error(`❌ Tally connection error for query ${row.id}:`, err.message);
+    return;
   }
-
   const tallyData = response.data;
 
-  // ── Detect Tally auth failure (special case — leave status alone) ───────
+  // Tally auth failure (apply cooldown, don't process any entries this round)
   if (typeof tallyData === 'string' && tallyData.includes('Authentication Failed')) {
-    console.error(`🔐 Tally auth failed for ${invoiceNo}. Bumping retry counter.`);
+    console.error(`🔐 Tally auth failed for query ${row.id}. Bumping retry counter.`);
     await supabase.from('queries').update({
       verification_error: 'Tally authentication failed — escalate to admin',
       auth_failure_count: (row.auth_failure_count || 0) + 1,
@@ -162,104 +161,102 @@ async function processVerification(row) {
     return;
   }
 
-  // ── Locate the voucher: try XML parse first, fall back to substring ─────
-  // Substring fallback preserves the legacy bridge's behaviour for any voucher
-  // XML shape we didn't anticipate. The party-name cross-check below only runs
-  // when XML parse succeeds — if it doesn't, we degrade to the old "invoice
-  // number exists → verified" behaviour rather than rejecting legitimate work.
-  let voucher = null;
+  // Parse XML once
+  let vouchers = [];
   try {
     const parsed = parser.parse(tallyData);
-    const vouchers = collectVouchers(parsed);
-    const targetNum = normalizeInvoice(invoiceNo);
-    voucher = vouchers.find(v => normalizeInvoice(tallyVal(v.VOUCHERNUMBER)) === targetNum);
+    vouchers = collectVouchers(parsed);
   } catch (e) {
-    console.warn('XML parse error (falling back to substring):', e.message);
+    console.warn('XML parse error (will fall back to substring):', e.message);
   }
 
-  let foundViaSubstring = false;
-  if (!voucher && typeof tallyData === 'string') {
-    const escapedInv = invoiceNo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const pattern = new RegExp(`<VOUCHERNUMBER[^>]*>\\s*${escapedInv}\\s*</VOUCHERNUMBER>`, 'i');
-    foundViaSubstring = pattern.test(tallyData);
-  }
-
-  // ── Not found in Tally at all → fail verification ───────────────────────
-  if (!voucher && !foundViaSubstring) {
-    console.log(`❌ Invoice ${invoiceNo} NOT found in Tally (${TALLY_LOOKBACK_DAYS}d back, ${TALLY_FORWARD_DAYS}d ahead).`);
-    await supabase.from('queries').update({
-      status: 'verification_failed',
-      verification_error: `Invoice "${invoiceNo}" not found in Tally (checked ${TALLY_LOOKBACK_DAYS} days back, ${TALLY_FORWARD_DAYS} days ahead).`,
-      verification_timestamp: new Date().toISOString(),
-      last_activity_at: new Date().toISOString(),
-      invoice_attempt_count: (row.invoice_attempt_count || 0) + 1,
-    }).eq('id', row.id);
-    return;
-  }
-
-  // ── Cross-check 1: this invoice number already verified for another query? ─
-  const { data: dupes, error: dupErr } = await supabase
-    .from('queries')
-    .select('id, customer_name')
-    .neq('id', row.id)
-    .eq('tally_invoice_number', invoiceNo)
-    .in('status', ['verified_pending_dispatch', 'partially_dispatched', 'completed']);
-
-  if (!dupErr && dupes && dupes.length > 0) {
-    const otherCust = dupes[0].customer_name || 'another customer';
-    console.log(`⚠ Invoice ${invoiceNo} already used for "${otherCust}". Rejecting duplicate.`);
-    await supabase.from('queries').update({
-      status: 'verification_failed',
-      verification_error:
-        `Invoice "${invoiceNo}" is already verified for the query of "${otherCust}". ` +
-        `Each Tally invoice can only verify one query — please enter a different invoice number.`,
-      verification_timestamp: new Date().toISOString(),
-      last_activity_at: new Date().toISOString(),
-      invoice_attempt_count: (row.invoice_attempt_count || 0) + 1,
-    }).eq('id', row.id);
-    return;
-  }
-
-  // ── Cross-check 2: party-name match (Ops Guide §7) ──────────────────────
-  // Only runs when XML parse found a voucher object. If we got here via the
-  // substring fallback (rare — voucher XML shape differs from expected), we
-  // skip the party check and fall through to the verified path. The DB-level
-  // unique index from migration 004 still protects against duplicate-invoice
-  // misuse even in that case.
   const queryCustomer = (row.customer_name || '').trim();
 
-  if (voucher) {
-    const tallyParty = (tallyVal(voucher.PARTYLEDGERNAME) || tallyVal(voucher.PARTYNAME) || '').trim();
+  // Process each entry independently
+  const updatedEntries = entries.map((entry) => {
+    if (!entry || entry.status !== 'pending') return entry;
 
-    if (tallyParty && queryCustomer &&
-        tallyParty.toLowerCase() !== queryCustomer.toLowerCase()) {
-      console.log(`⚠ Party mismatch — Tally: "${tallyParty}" vs Query: "${queryCustomer}". Rejecting.`);
-      await supabase.from('queries').update({
-        status: 'verification_failed',
-        verification_error:
-          `Invoice "${invoiceNo}" is for "${tallyParty}", but this query is for "${queryCustomer}". ` +
-          `Did you enter the wrong invoice number? Please re-check Tally and re-submit.`,
-        verification_timestamp: new Date().toISOString(),
-        last_activity_at: new Date().toISOString(),
-        invoice_attempt_count: (row.invoice_attempt_count || 0) + 1,
-      }).eq('id', row.id);
-      return;
+    const invoiceNo = entry.invoice_no;
+    const targetNum = normalizeInvoice(invoiceNo);
+
+    let voucher = vouchers.find(v => normalizeInvoice(tallyVal(v.VOUCHERNUMBER)) === targetNum);
+
+    let foundViaSubstring = false;
+    if (!voucher && typeof tallyData === 'string') {
+      const escapedInv = invoiceNo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const pattern = new RegExp(`<VOUCHERNUMBER[^>]*>\\s*${escapedInv}\\s*</VOUCHERNUMBER>`, 'i');
+      foundViaSubstring = pattern.test(tallyData);
     }
+
+    if (!voucher && !foundViaSubstring) {
+      console.log(`   ❌ ${invoiceNo} not found in Tally.`);
+      return {
+        ...entry,
+        status: 'failed',
+        verified_at: null,
+        verification_error: `Invoice "${invoiceNo}" not found in Tally (checked ${TALLY_LOOKBACK_DAYS}d back, ${TALLY_FORWARD_DAYS}d ahead).`,
+      };
+    }
+
+    // Party-name cross-check when XML parse succeeded
+    if (voucher) {
+      const tallyParty = (tallyVal(voucher.PARTYLEDGERNAME) || tallyVal(voucher.PARTYNAME) || '').trim();
+      if (tallyParty && queryCustomer &&
+          tallyParty.toLowerCase() !== queryCustomer.toLowerCase()) {
+        console.log(`   ⚠ ${invoiceNo} party mismatch — Tally: "${tallyParty}" vs Query: "${queryCustomer}".`);
+        return {
+          ...entry,
+          status: 'failed',
+          verified_at: null,
+          verification_error: `Invoice "${invoiceNo}" is for "${tallyParty}", not "${queryCustomer}". Re-check the invoice number.`,
+        };
+      }
+    }
+
+    console.log(`   ✅ ${invoiceNo} verified for "${queryCustomer}".`);
+    return {
+      ...entry,
+      status: 'verified',
+      verified_at: new Date().toISOString(),
+      verification_error: null,
+    };
+  });
+
+  // ─── Roll up to query state ─────
+  const anyFailed = updatedEntries.some(e => e && e.status === 'failed');
+  const allVerified = updatedEntries.every(e => e && e.status === 'verified');
+  const verifiedCartoons = updatedEntries.filter(e => e && e.status === 'verified')
+    .reduce((s, e) => s + (e.cartoons || 0), 0);
+  const verifiedLots = updatedEntries.filter(e => e && e.status === 'verified')
+    .reduce((s, e) => s + (e.lots || 0), 0);
+  const needCartoons = row.cartoons || 0;
+  const needLots = row.lots || 0;
+  const coversQuery = verifiedCartoons >= needCartoons && verifiedLots >= needLots;
+
+  let newStatus, errorMessage = null, attemptIncrement = 0;
+  if (anyFailed) {
+    newStatus = 'verification_failed';
+    const firstFailed = updatedEntries.find(e => e && e.status === 'failed');
+    errorMessage = firstFailed?.verification_error || 'One or more invoices failed verification.';
+    attemptIncrement = 1;
+  } else if (allVerified && coversQuery) {
+    newStatus = 'verified_pending_dispatch';
   } else {
-    console.log(`ℹ Found invoice ${invoiceNo} via substring fallback — party-name cross-check skipped.`);
+    // Still waiting (all good so far but quantity not yet covered).
+    newStatus = 'pending_verification';
   }
 
-  // ── All checks passed → mark verified ───────────────────────────────────
-  console.log(`✅ Verified — invoice ${invoiceNo} matches "${queryCustomer || '(unknown customer)'}".`);
   await supabase.from('queries').update({
-    status: 'verified_pending_dispatch',
+    invoice_entries: updatedEntries,
+    status: newStatus,
+    verification_error: errorMessage,
     verification_timestamp: new Date().toISOString(),
-    verification_error: null,
     last_activity_at: new Date().toISOString(),
+    invoice_attempt_count: (row.invoice_attempt_count || 0) + attemptIncrement,
   }).eq('id', row.id);
 }
 
-// ─── Boot ─────────────────────────────────────────────────────────────────
+// ─── Boot ────────────────────────────────────────────────────────────────
 async function initialSweep() {
   const { data, error } = await supabase
     .from('queries').select('*').eq('status', 'pending_verification');
@@ -269,7 +266,8 @@ async function initialSweep() {
   }
   console.log(`Initial sweep: ${(data || []).length} pending-verification queries.`);
   for (const row of data || []) {
-    await processVerification(row);
+    try { await processVerification(row); }
+    catch (e) { console.error(`Error processing query ${row.id}:`, e.message); }
   }
 }
 
@@ -285,14 +283,14 @@ function subscribe() {
       try {
         await processVerification(row);
       } catch (e) {
-        console.error(`❌ Error processing verification for ${row?.tally_invoice_number}:`, e.message);
+        console.error(`❌ Error processing verification for query ${row?.id}:`, e.message);
       }
     })
     .subscribe((status, err) => {
       if (status === 'SUBSCRIBED') {
         console.log('🎧 Realtime SUBSCRIBED — listening for pending verifications.');
       } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
-        console.error(`⚠ Realtime ${status}${err ? `: ${err.message}` : ''} — falling back to periodic poll.`);
+        console.error(`⚠ Realtime ${status}${err ? `: ${err.message}` : ''}`);
       } else {
         console.log(`🎧 Realtime status: ${status}`);
       }
